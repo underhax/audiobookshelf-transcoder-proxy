@@ -5,9 +5,6 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/underhax/audiobookshelf-transcoder-proxy)](https://github.com/underhax/audiobookshelf-transcoder-proxy/commits/main)
 [![GitHub issues](https://img.shields.io/github/issues/underhax/audiobookshelf-transcoder-proxy)](https://github.com/underhax/audiobookshelf-transcoder-proxy/issues)
 [![GitHub repo size](https://img.shields.io/github/repo-size/underhax/audiobookshelf-transcoder-proxy)](https://github.com/underhax/audiobookshelf-transcoder-proxy)
-[![Docker](https://github.com/underhax/audiobookshelf-transcoder-proxy/actions/workflows/build.yml/badge.svg)](https://github.com/underhax/audiobookshelf-transcoder-proxy/actions/workflows/build.yml)
-[![Security Advisories](https://img.shields.io/github/security-advisories/underhax/audiobookshelf-transcoder-proxy)](https://github.com/underhax/audiobookshelf-transcoder-proxy/security/advisories)
-[![Go Report](https://goreportcard.com/badge/github.com/underhax/audiobookshelf-transcoder-proxy)](https://goreportcard.com/report/github.com/underhax/audiobookshelf-transcoder-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Audiobookshelf Transcoder Proxy (`abstp`) is a lightweight, secure, and high-performance audio transcoding proxy service. It bridges [Audiobookshelf](https://www.audiobookshelf.org/) with external media players, smart speakers, and home automation systems.

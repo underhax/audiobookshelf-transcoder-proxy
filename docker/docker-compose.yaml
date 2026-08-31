@@ -1,0 +1,53 @@
+services:
+  abstp:
+    image: ghcr.io/underhax/audiobookshelf-transcoder-proxy:latest
+    container_name: abstp
+    hostname: abstp
+    restart: always
+    healthcheck:
+      test: ["CMD", "/app/abstp", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    ports:
+      - "127.0.0.1:8099:8099"
+    networks:
+      - abstp
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - ABSTP_ABS_URL=${ABSTP_ABS_URL:-https://abs.example.org}
+    secrets:
+      - abstp_abs_token
+      - abstp_api_key
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          memory: 64m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add: []
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,noexec,nosuid
+    user: "65534:65534"
+
+secrets:
+  abstp_abs_token:
+    file: ./secrets/abstp_abs_token.txt
+  abstp_api_key:
+    file: ./secrets/abstp_api_key.txt
+
+networks:
+  abstp:

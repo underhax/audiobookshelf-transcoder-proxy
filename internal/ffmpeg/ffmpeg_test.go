@@ -173,14 +173,6 @@ func TestStartProcess_Success(t *testing.T) {
 	if waitErr := cmd.Wait(); waitErr != nil {
 		t.Errorf("wait error: %v", waitErr)
 	}
-
-	if _, _, defProcErr := StartProcess(context.Background(), Params{
-		FFmpegPath: "",
-	}); defProcErr != nil {
-		if defProcErr.Error() == "" {
-			t.Error("expected non-empty error")
-		}
-	}
 }
 
 func TestStartProcess_Errors(t *testing.T) {
@@ -201,21 +193,35 @@ func TestStartProcess_Errors(t *testing.T) {
 func TestStartProcess_StdoutPipeError(t *testing.T) {
 	origCmd := commandContext
 	commandContext = func(ctx context.Context) *exec.Cmd {
-		cmd := exec.CommandContext(ctx, "echo")
+		cmd := exec.CommandContext(ctx, "true")
 		cmd.Stdout = io.Discard
 		return cmd
 	}
 	defer func() { commandContext = origCmd }()
 
 	if _, _, pipeErr := StartProcess(context.Background(), Params{
-		FFmpegPath: "",
+		FFmpegPath: "true",
 	}); pipeErr == nil {
 		t.Fatal("expected error creating stdout pipe when Stdout is already set")
 	}
 
 	defCmd := defaultCommandContext(context.Background())
 	if defCmd == nil {
-		t.Fatal("expected non-nil cmd from DefaultCommandContext")
+		t.Fatal("expected non-nil cmd from defaultCommandContext")
+	}
+}
+
+func TestStartProcess_StartError(t *testing.T) {
+	origCmd := commandContext
+	commandContext = func(ctx context.Context) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "false")
+		cmd.Dir = "/non/existent/directory/xyz/123"
+		return cmd
+	}
+	defer func() { commandContext = origCmd }()
+
+	if _, _, err := StartProcess(context.Background(), Params{FFmpegPath: "false"}); err == nil {
+		t.Fatal("expected error starting command with invalid dir")
 	}
 }
 

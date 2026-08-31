@@ -78,15 +78,15 @@ func StartProcess(ctx context.Context, params Params) (cmd *exec.Cmd, stdout io.
 		binName = params.FFmpegPath
 	}
 
-	cmd = commandContext(ctx)
-	if binName != "ffmpeg" {
-		binPath, lookErr := exec.LookPath(binName)
-		if lookErr != nil {
-			return nil, nil, fmt.Errorf("lookup binary %s: %w", binName, lookErr)
-		}
-		cmd.Path = filepath.Clean(binPath)
+	binPath, lookErr := exec.LookPath(binName)
+	if lookErr != nil {
+		return nil, nil, fmt.Errorf("lookup binary %s: %w", binName, lookErr)
 	}
+
+	cmd = commandContext(ctx)
+	cmd.Path = filepath.Clean(binPath)
 	cmd.Args = append([]string{binName}, args...)
+	cmd.Err = nil
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

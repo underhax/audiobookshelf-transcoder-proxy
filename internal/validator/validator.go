@@ -116,3 +116,22 @@ func ValidateListenAddr(addr string) error {
 	}
 	return nil
 }
+
+// ValidateRequestPath ensures that the requested path does not exceed length limits,
+// contains no path traversal sequences (.. or //), and contains only allowed characters.
+func ValidateRequestPath(path, requestURI string) error {
+	if len(path) > 256 {
+		return errors.New("bad request: path too long")
+	}
+	if strings.Contains(requestURI, "//") || strings.Contains(requestURI, "..") {
+		return errors.New("bad request: invalid path characters")
+	}
+	for i := range len(path) {
+		c := path[i]
+		valid := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '.' || c == '_'
+		if !valid {
+			return errors.New("bad request: invalid character in path")
+		}
+	}
+	return nil
+}

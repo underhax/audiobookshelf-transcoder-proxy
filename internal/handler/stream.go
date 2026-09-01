@@ -219,6 +219,14 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	select {
+	case h.streamsSem <- struct{}{}:
+		defer func() { <-h.streamsSem }()
+	default:
+		http.Error(w, `{"error":"maximum active streams reached"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	if h.cfg.Debug {
 		log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] stream token validated for session %s (reusable=%v), preparing input", sessionID, h.cfg.DevReusableToken), "\n", " "))
 	}

@@ -70,6 +70,43 @@ func TestStream_Errors(t *testing.T) {
 	}
 }
 
+func TestStream_MaxStreamsExceeded(t *testing.T) {
+	t.Parallel()
+
+	h, store := newTestEnv(t, nil)
+	routes := h.Routes()
+
+	sess := &session.Session{
+		ID: "sess-max-streams",
+		AudioTracks: []absclient.AudioTrack{
+			{Index: 0, Duration: 10.0, ContentURL: "/track.mp3"},
+		},
+	}
+	tok, err := store.Create(sess)
+	if err != nil {
+		t.Fatalf("store create: %v", err)
+	}
+
+	for range cap(h.streamsSem) {
+		h.streamsSem <- struct{}{}
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/stream/sess-max-streams.aac?token="+tok, http.NoBody)
+	rec := httptest.NewRecorder()
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 Too Many Requests, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "maximum active streams reached") {
+		t.Errorf("expected max streams error message, got %s", rec.Body.String())
+	}
+
+	for range cap(h.streamsSem) {
+		<-h.streamsSem
+	}
+}
+
 func TestStream_Success(t *testing.T) {
 	t.Parallel()
 

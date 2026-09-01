@@ -141,3 +141,52 @@ func TestLoad_BooleanValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_MaxConnsAndStreamsValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		envKey string
+		cases  []struct {
+			name string
+			val  string
+		}
+	}{
+		{
+			envKey: "ABSTP_MAX_CONNS",
+			cases: []struct {
+				name string
+				val  string
+			}{
+				{name: "invalid not a number", val: "abc"},
+				{name: "below minimum", val: "49"},
+				{name: "above maximum", val: "1001"},
+			},
+		},
+		{
+			envKey: "ABSTP_MAX_STREAMS",
+			cases: []struct {
+				name string
+				val  string
+			}{
+				{name: "invalid not a number", val: "xyz"},
+				{name: "below minimum", val: "0"},
+				{name: "above maximum", val: "21"},
+			},
+		},
+	}
+
+	for _, group := range tests {
+		for _, tc := range group.cases {
+			t.Run(group.envKey+"_"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				env := func(k string) string {
+					return mockEnvValue(group.envKey, tc.val, k)
+				}
+				if _, err := Load(env, mockLookPathSuccess, "dev"); err == nil {
+					t.Errorf("expected error for %s with val %s", group.envKey, tc.val)
+				}
+			})
+		}
+	}
+}

@@ -26,16 +26,31 @@ type Handler struct {
 	absClient         *absclient.Client
 	store             *session.Store
 	cfg               *config.Config
+	connsSem          chan struct{}
+	streamsSem        chan struct{}
 	syncInterval      time.Duration
 	keepaliveInterval time.Duration
 }
 
 // NewHandler initializes a new Handler.
 func NewHandler(cfg *config.Config, store *session.Store, absClient *absclient.Client) *Handler {
+	maxConns := 100
+	maxStreams := 5
+	if cfg != nil {
+		if cfg.MaxConns > 0 {
+			maxConns = cfg.MaxConns
+		}
+		if cfg.MaxStreams > 0 {
+			maxStreams = cfg.MaxStreams
+		}
+	}
+
 	return &Handler{
 		cfg:               cfg,
 		store:             store,
 		absClient:         absClient,
+		connsSem:          make(chan struct{}, maxConns),
+		streamsSem:        make(chan struct{}, maxStreams),
 		syncInterval:      syncInterval,
 		keepaliveInterval: 1 * time.Second,
 	}
@@ -45,6 +60,8 @@ func NewHandler(cfg *config.Config, store *session.Store, absClient *absclient.C
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("GET /{$}", h.HandleRoot)
+	mux.HandleFunc("GET /favicon.ico", h.HandleFavicon)
 	mux.HandleFunc("GET /health", h.HandleHealth)
 	mux.HandleFunc("GET /api/proxy/books", h.requireAuth(h.HandleGetBooks))
 	mux.HandleFunc("GET /api/proxy/podcasts", h.requireAuth(h.HandleGetPodcasts))
@@ -54,30 +71,26 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /stream/{session_id}", h.HandleStream)
 	mux.HandleFunc("POST /api/proxy/session/stop", h.requireAuth(h.HandleSessionStop))
 
-	return securePathMiddleware(mux)
+	return h.securityMiddleware(mux)
 }
 
-func securePathMiddleware(next http.Handler) http.Handler {
+func (h *Handler) securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none';")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
 
-		if len(path) > 256 {
-			http.Error(w, `{"error":"bad request: path too long"}`, http.StatusBadRequest)
+		select {
+		case h.connsSem <- struct{}{}:
+			defer func() { <-h.connsSem }()
+		default:
+			http.Error(w, `{"error":"server overloaded"}`, http.StatusTooManyRequests)
 			return
 		}
 
-		if strings.Contains(r.RequestURI, "//") || strings.Contains(r.RequestURI, "..") {
-			http.Error(w, `{"error":"bad request: invalid path characters"}`, http.StatusBadRequest)
+		if err := validator.ValidateRequestPath(r.URL.Path, r.RequestURI); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 			return
-		}
-
-		for i := range path {
-			c := path[i]
-			valid := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '.' || c == '_'
-			if !valid {
-				http.Error(w, `{"error":"bad request: invalid character in path"}`, http.StatusBadRequest)
-				return
-			}
 		}
 
 		next.ServeHTTP(w, r)
@@ -106,6 +119,20 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
+}
+
+// HandleRoot delivers a minimal plain text response indicating the service is operational for human web browser requests.
+func (h *Handler) HandleRoot(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte("OK\n")); err != nil {
+		log.Printf("write root response error: %v", err)
+	}
+}
+
+// HandleFavicon returns HTTP 204 No Content to suppress browser favicon requests and prevent log pollution.
+func (h *Handler) HandleFavicon(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandleHealth returns HTTP 200 OK for liveness and readiness probes.

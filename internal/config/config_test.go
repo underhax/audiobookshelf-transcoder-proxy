@@ -105,6 +105,12 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.BufferDuration != 10*time.Second {
 		t.Errorf("expected default BufferDuration 10s, got %v", cfg.BufferDuration)
 	}
+	if cfg.MaxConns != 100 {
+		t.Errorf("expected default MaxConns 100, got %d", cfg.MaxConns)
+	}
+	if cfg.MaxStreams != 5 {
+		t.Errorf("expected default MaxStreams 5, got %d", cfg.MaxStreams)
+	}
 	if cfg.InDocker {
 		t.Errorf("expected default InDocker false, got true")
 	}
@@ -137,6 +143,28 @@ func TestLoad_CustomOptions(t *testing.T) {
 			verify: func(cfg Config) error {
 				if cfg.BufferDuration != 15*time.Second {
 					return errors.New("expected 15s BufferDuration")
+				}
+				return nil
+			},
+		},
+		{
+			name: "custom max conns",
+			key:  "ABSTP_MAX_CONNS",
+			val:  "250",
+			verify: func(cfg Config) error {
+				if cfg.MaxConns != 250 {
+					return errors.New("expected 250 MaxConns")
+				}
+				return nil
+			},
+		},
+		{
+			name: "custom max streams",
+			key:  "ABSTP_MAX_STREAMS",
+			val:  "12",
+			verify: func(cfg Config) error {
+				if cfg.MaxStreams != 12 {
+					return errors.New("expected 12 MaxStreams")
 				}
 				return nil
 			},

@@ -16,6 +16,10 @@ services:
       retries: 3
       start_period: 5s
     ports:
+      # Keep 127.0.0.1 for maximum security when behind a local reverse proxy (e.g. Nginx).
+      # For direct LAN access from external media players, replace 127.0.0.1 with your server's
+      # local LAN IP and optionally customize the host port.
+      # Example: "192.168.1.50:9099:8099"
       - "127.0.0.1:8099:8099"
     networks:
       - abstp

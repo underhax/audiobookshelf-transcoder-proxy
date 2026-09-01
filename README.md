@@ -7,25 +7,36 @@
 [![GitHub repo size](https://img.shields.io/github/repo-size/underhax/audiobookshelf-transcoder-proxy)](https://github.com/underhax/audiobookshelf-transcoder-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Audiobookshelf Transcoder Proxy (`abstp`) is a lightweight, secure, and high-performance audio transcoding proxy service. It bridges [Audiobookshelf](https://www.audiobookshelf.org/) with external media players, smart speakers, and home automation systems.
+`abstp` is a lightweight proxy service written in Go, utilizing FFmpeg for real-time audio processing.
 
-Many external media players, smart speakers, and cast targets cannot natively adjust playback speed when streaming remote audio. `abstp` solves this by transcoding multi-track audiobooks and podcasts on-the-fly with **custom playback speed control** (from `0.5x` to `3.0x`) without pitch distortion, while maintaining real-time progress synchronization with your Audiobookshelf server.
+It proxies library metadata, podcasts, and cover artwork from Audiobookshelf. The service serves on-the-fly transcoded continuous audio streams with custom playback speed control and two-way progress synchronization for smart speakers, media players, and home automation systems.
 
-The service is built with Go for maximum performance and low resource consumption, running alongside FFmpeg for real-time audio demuxing and transcoding.
+Official Docker images (with FFmpeg included) and standalone binaries are provided.
+
+---
+
+## Motivation
+
+Native Audiobookshelf mobile apps provide rich playback controls and speed adjustment. However, when streaming to external smart speakers, network players, or cast targets, most devices face several limitations:
+
+- **Lack of Speed Control**: Inability to adjust playback tempo for remote audio streams.
+- **Multi-Track Transitions**: Unwanted pauses, gaps, or playback failures between audiobook chapters.
+- **Progress Tracking Drift**: Inaccurate server progress synchronization during non-standard playback.
+
+Audiobookshelf Transcoder Proxy resolves the problems listed above.
 
 ---
 
 ## Features
 
-- **Variable Playback Speed on Any Device**: Enables custom playback speeds (e.g. `0.5x` to `3.0x`) on smart speakers and cast targets that lack native speed controls, applying FFmpeg's `atempo` filter without pitch distortion.
-- **On-the-Fly Concat & Transcoding**: Merges multi-track audiobooks and podcast episodes seamlessly into a continuous, single CBR AAC (64 kbps) audio stream without chapter pauses or playback interruption.
-- **Single-Use Stream Tokens**: Generates cryptographically secure, single-use stream tokens with a configurable expiration TTL (default: `30s`). Tokens are invalidated upon connection, preventing unauthorized link sharing or URL hijacking by third parties.
-- **Instant Pre-Buffering**: Delivers an immediate unthrottled burst of audio data (default: `10s`, configurable) directly to the player upon connection, eliminating startup latency and preventing playback stutter.
-- **Paced Stream Rate Limiting**: Throttles ongoing audio delivery to match the target 64 kbps bitstream, reducing server memory usage and network congestion while maintaining rock-solid sync.
-- **Two-Way Progress Synchronization**: Accurately tracks listened time accounting for playback speed and pre-buffering, syncing progress back to Audiobookshelf every 30 seconds and sending a final sync + session close on stop or disconnect.
-- **Catalog & Artwork Proxy**: Exposes REST endpoints to query books, podcasts, episodes, and cached cover images.
-- **Lightweight & Self-Contained**: Minimal CPU and memory footprint with zero external database requirements.
-- **Secure Containerization**: Official Docker image runs as non-root (`65534:65534`) with a read-only filesystem, dropped Linux capabilities, and `no-new-privileges`.
+- **Playback Speed**: Dynamic tempo adjustment (`0.5x` to `3.0x`) without pitch distortion.
+- **Audio Concat**: Seamless multi-track transcoding into a single continuous stream without pauses.
+- **Single-Use Tokens**: Cryptographically secure stream URLs invalidated upon connection.
+- **Smart Buffering**: Instant initial audio burst followed by paced rate-limited streaming.
+- **Progress Sync**: Accurate real-time listening progress tracking adjusted for playback speed.
+- **Metadata Proxy**: REST endpoints for browsing books, podcasts, and cached cover artwork.
+- **Built-in Security**: Single-use stream tokens, automated CSP/security headers, concurrency limits, timing-attack resistant auth, path traversal guards, and more.
+- **Hardened Container**: Non-root Docker image with a read-only filesystem, dropped capabilities, and privilege escalation protection.
 
 ---
 
@@ -49,14 +60,14 @@ You can deploy `abstp` using Docker Compose. A production-ready `docker-compose.
    ```bash
    mkdir -p "${BASE_DIR}/secrets"
 
-   # 2.1 Paste your Audiobookshelf user API token:
+   # Paste your Audiobookshelf user API token:
    nano "${BASE_DIR}/secrets/abstp_abs_token.txt"
 
-   # 2.2 Generate a strong secret key for proxy authentication:
+   # Generate a strong secret key for proxy authentication:
    pwgen -s 64 1 > "${BASE_DIR}/secrets/abstp_api_key.txt"
 
-   # 2.3 Restrict file permissions:
-   chmod 600 "${BASE_DIR}/secrets/"*.txt
+   # Restrict file permissions:
+   chmod 400 "${BASE_DIR}/secrets/"*.txt && chown -R 65534:65534 "${BASE_DIR}/secrets/"
    ```
 
 3. Edit `${BASE_DIR}/.env` with your configuration:
@@ -64,26 +75,22 @@ You can deploy `abstp` using Docker Compose. A production-ready `docker-compose.
    nano "${BASE_DIR}/.env"
    ```
 
-   > [!TIP]
-   > **Network Access & Stream URLs:**
-   > `abstp` automatically detects the incoming request protocol, host, and port to generate playback stream URLs.
-   > - **Behind Reverse Proxy (Recommended):** Keep the default `127.0.0.1:8099:8099` in `docker-compose.yaml` and configure Nginx (see below).
-   > - **Direct Local Network (LAN):** To allow other devices in your network (e.g. smart speakers) to connect directly without a reverse proxy, change `ports` in `docker-compose.yaml` to your server LAN IP (e.g. `- "192.168.1.50:8099:8099"`, replacing `192.168.1.50` with your actual server IP, or `- "8099:8099"` to bind to all interfaces).
+4. Run and manage the service:
 
-4. Start the container:
+   **Start the service:**
    ```bash
    docker compose -f "${BASE_DIR}/docker-compose.yaml" up -d
    ```
 
-To check service status and health, run:
-```bash
-docker compose -f "${BASE_DIR}/docker-compose.yaml" ps
-```
+   **Check service status and health:**
+   ```bash
+   docker compose -f "${BASE_DIR}/docker-compose.yaml" ps
+   ```
 
-To stop the service, run:
-```bash
-docker compose -f "${BASE_DIR}/docker-compose.yaml" down
-```
+   **Stop and remove the service:**
+   ```bash
+   docker compose -f "${BASE_DIR}/docker-compose.yaml" down
+   ```
 
 <details>
 <summary><b>View manual docker run command</b></summary>
@@ -106,7 +113,6 @@ docker run -d \
   -v "${BASE_DIR}/secrets/abstp_abs_token.txt:/run/secrets/abstp_abs_token:ro" \
   -v "${BASE_DIR}/secrets/abstp_api_key.txt:/run/secrets/abstp_api_key:ro" \
   -e ABSTP_ABS_URL="https://abs.example.org" \
-  -e ABSTP_EXTERNAL_URL="https://abstp.example.org" \
   ghcr.io/underhax/audiobookshelf-transcoder-proxy:latest
 ```
 
@@ -114,7 +120,7 @@ docker run -d \
 
 ### Reverse Proxy Configuration (Nginx)
 
-When deploying behind Nginx with SSL, configure `ABSTP_EXTERNAL_URL=https://abstp.example.org` and ensure proxy buffering is disabled to allow continuous real-time audio streaming:
+Example production-ready Nginx configuration for HTTPS reverse proxying and real-time streaming:
 
 <details>
 <summary><b>View Nginx configuration example</b></summary>
@@ -124,16 +130,43 @@ server {
     listen 443 ssl http2;
     server_name abstp.example.org;
 
+    # TLS protocols & recommended modern ciphers (Mozilla Intermediate profile)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
     ssl_certificate /etc/letsencrypt/live/abstp.example.org/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/abstp.example.org/privkey.pem;
+
+    # SSL session cache (enable if not already defined globally in http { ... } context):
+    # ssl_session_cache shared:SSL:10m;
+    # ssl_session_timeout 1d;
+
+    # HTTP Strict Transport Security (HSTS) with subdomains
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Request body size limit for lightweight JSON payloads
+    client_max_body_size 1m;
+
+    # Security headers enforced automatically by the abstp backend:
+    # - Content-Security-Policy: default-src 'none'; frame-ancestors 'none';
+    # - X-Content-Type-Options: nosniff
+    # - X-Frame-Options: DENY
+
+    # Block access to hidden files (.git, .env, etc.)
+    location ~ /\. {
+        deny all;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:8099;
         proxy_http_version 1.1;
+        proxy_set_header Connection "";
 
-        # Disable buffering for real-time throttled audio streams
+        # Real-time streaming without disk caching
         proxy_buffering off;
         proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
 
         # Keep long-running audiobook streams alive
         proxy_read_timeout 86400s;
@@ -144,9 +177,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
     }
 }
 ```
+
+> **Note:** `abstp` implements built-in application-level concurrency controls (`ABSTP_MAX_CONNS` and `ABSTP_MAX_STREAMS`).
+>
+> If you wish to apply additional per-IP rate limiting at the reverse proxy layer, refer to the official [Nginx Rate Limiting documentation](https://docs.nginx.com/nginx/admin-guide/security-controls/controlling-access-proxied-http/).
 
 </details>
 
@@ -170,20 +208,22 @@ server {
 
 #### CLI Commands
 
-`abstp` provides built-in CLI commands and options for maintenance:
+Audiobookshelf Transcoder Proxy provides built-in CLI commands and options for maintenance:
 
-- **`help`, `-h`, `--help`**: Displays usage instructions, available flags, and environment variables:
-  ```bash
-  ./abstp help
-  ```
-- **`version`, `-v`, `--version`**: Prints the installed version of abstp:
-  ```bash
-  ./abstp version
-  ```
-- **`-healthcheck`**: Executes a lightweight HTTP health check against the local server (exiting with code 0 if healthy, 1 if unhealthy). Specifically designed for Docker container and Compose health checks:
-  ```bash
-  ./abstp -healthcheck
-  ```
+**`--help`** (`-h`): Displays usage instructions, available flags, and environment variables:
+```bash
+./abstp --help
+```
+
+**`--version`** (`-v`): Prints the installed version of abstp:
+```bash
+./abstp --version
+```
+
+**`--healthcheck`**: Executes a lightweight HTTP health check against the local server:
+```bash
+./abstp --healthcheck
+```
 
 #### Configuration
 
@@ -199,6 +239,8 @@ server {
 - `ABSTP_FFMPEG_PATH`: Path to the `ffmpeg` binary (default: `ffmpeg`).
 - `ABSTP_TOKEN_TTL`: Validity duration for single-use playback stream tokens (default: `30s`).
 - `ABSTP_BUFFER_DURATION`: Initial stream burst buffer duration sent immediately to prime client buffers (default: `10s`, minimum: `5s`).
+- `ABSTP_MAX_CONNS`: Global maximum concurrent incoming HTTP connections (default: `100`, allowed: `50` to `1000`).
+- `ABSTP_MAX_STREAMS`: Maximum concurrent active FFmpeg transcoding streams (default: `5`, allowed: `1` to `20`).
 - `ABSTP_IN_DOCKER`: Set to `true` when running in Docker to suppress terminal interactivity messages (default: `false`).
 
 <details>
@@ -280,6 +322,7 @@ For instructions on how to set up the development environment, build the project
 
 ---
 
-## License
+## Acknowledgments
 
-This project is licensed under the [MIT License](LICENSE).
+- [Audiobookshelf](https://www.audiobookshelf.org/) — Self-hosted audiobook and podcast server.
+- [FFmpeg](https://ffmpeg.org/) — Multimedia framework for audio processing and transcoding.

@@ -24,6 +24,8 @@ type Config struct {
 	FFmpegPath       string
 	TokenTTL         time.Duration
 	BufferDuration   time.Duration
+	MaxConns         int
+	MaxStreams       int
 	InDocker         bool
 	Debug            bool
 	DevReusableToken bool
@@ -187,29 +189,105 @@ func parseDevReusableToken(getenv func(string) string) (bool, error) {
 	return parsed, nil
 }
 
+func parseMaxConns(getenv func(string) string) (int, error) {
+	raw := strings.TrimSpace(getenv("ABSTP_MAX_CONNS"))
+	if raw == "" {
+		return 100, nil
+	}
+	val, err := strconv.Atoi(raw)
+	if err != nil || val < 50 || val > 1000 {
+		return 0, errors.New("invalid ABSTP_MAX_CONNS: must be an integer between 50 and 1000")
+	}
+	return val, nil
+}
+
+func parseMaxStreams(getenv func(string) string) (int, error) {
+	raw := strings.TrimSpace(getenv("ABSTP_MAX_STREAMS"))
+	if raw == "" {
+		return 5, nil
+	}
+	val, err := strconv.Atoi(raw)
+	if err != nil || val < 1 || val > 20 {
+		return 0, errors.New("invalid ABSTP_MAX_STREAMS: must be an integer between 1 and 20")
+	}
+	return val, nil
+}
+
+func parseCoreSettings(getenv func(string) string) (absURL, listenAddr, externalURL string, err error) {
+	absURL, err = parseABSURL(getenv)
+	if err != nil {
+		return "", "", "", err
+	}
+	listenAddr, err = parseListenAddr(getenv)
+	if err != nil {
+		return "", "", "", err
+	}
+	externalURL, err = parseExternalURL(getenv)
+	if err != nil {
+		return "", "", "", err
+	}
+	return absURL, listenAddr, externalURL, nil
+}
+
+func parseSecretKeys(getenv func(string) string) (absToken, apiKey string, err error) {
+	absToken, err = parseSecret(getenv, "ABSTP_ABS_TOKEN", "ABSTP_ABS_TOKEN_FILE", "/run/secrets/abstp_abs_token")
+	if err != nil {
+		return "", "", err
+	}
+	apiKey, err = parseSecret(getenv, "ABSTP_API_KEY", "ABSTP_API_KEY_FILE", "/run/secrets/abstp_api_key")
+	if err != nil {
+		return "", "", err
+	}
+	return absToken, apiKey, nil
+}
+
+func parseLimits(getenv func(string) string) (tokenTTL, bufferDuration time.Duration, maxConns, maxStreams int, err error) {
+	tokenTTL, err = parseTokenTTL(getenv)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	bufferDuration, err = parseBufferDuration(getenv)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	maxConns, err = parseMaxConns(getenv)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	maxStreams, err = parseMaxStreams(getenv)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return tokenTTL, bufferDuration, maxConns, maxStreams, nil
+}
+
+func parseFlags(getenv func(string) string, version string) (inDocker, debug, devReusableToken bool, err error) {
+	inDocker, err = parseInDocker(getenv)
+	if err != nil {
+		return false, false, false, err
+	}
+	debug, err = parseDebug(getenv)
+	if err != nil {
+		return false, false, false, err
+	}
+	devReusableToken, err = parseDevReusableToken(getenv)
+	if err != nil {
+		return false, false, false, err
+	}
+	if devReusableToken && version != "dev" {
+		return false, false, false, errors.New("ABSTP_DEV_REUSABLE_TOKEN is only permitted in dev builds")
+	}
+	return inDocker, debug, devReusableToken, nil
+}
+
 // Load reads and validates configuration values from the given environment getter function.
 func Load(getenv func(string) string, lookPath func(string) (string, error), version string) (Config, error) {
-	absURL, err := parseABSURL(getenv)
+	absURL, listenAddr, externalURL, err := parseCoreSettings(getenv)
 	if err != nil {
 		return Config{}, err
 	}
 
-	absToken, err := parseSecret(getenv, "ABSTP_ABS_TOKEN", "ABSTP_ABS_TOKEN_FILE", "/run/secrets/abstp_abs_token")
-	if err != nil {
-		return Config{}, err
-	}
-
-	apiKey, err := parseSecret(getenv, "ABSTP_API_KEY", "ABSTP_API_KEY_FILE", "/run/secrets/abstp_api_key")
-	if err != nil {
-		return Config{}, err
-	}
-
-	listenAddr, err := parseListenAddr(getenv)
-	if err != nil {
-		return Config{}, err
-	}
-
-	externalURL, err := parseExternalURL(getenv)
+	absToken, apiKey, err := parseSecretKeys(getenv)
 	if err != nil {
 		return Config{}, err
 	}
@@ -219,33 +297,14 @@ func Load(getenv func(string) string, lookPath func(string) (string, error), ver
 		return Config{}, err
 	}
 
-	tokenTTL, err := parseTokenTTL(getenv)
+	tokenTTL, bufferDuration, maxConns, maxStreams, err := parseLimits(getenv)
 	if err != nil {
 		return Config{}, err
 	}
 
-	bufferDuration, err := parseBufferDuration(getenv)
+	inDocker, debug, devReusableToken, err := parseFlags(getenv, version)
 	if err != nil {
 		return Config{}, err
-	}
-
-	inDocker, err := parseInDocker(getenv)
-	if err != nil {
-		return Config{}, err
-	}
-
-	debug, err := parseDebug(getenv)
-	if err != nil {
-		return Config{}, err
-	}
-
-	devReusableToken, err := parseDevReusableToken(getenv)
-	if err != nil {
-		return Config{}, err
-	}
-
-	if devReusableToken && version != "dev" {
-		return Config{}, errors.New("ABSTP_DEV_REUSABLE_TOKEN is only permitted in dev builds")
 	}
 
 	return Config{
@@ -257,6 +316,8 @@ func Load(getenv func(string) string, lookPath func(string) (string, error), ver
 		FFmpegPath:       ffmpegPath,
 		TokenTTL:         tokenTTL,
 		BufferDuration:   bufferDuration,
+		MaxConns:         maxConns,
+		MaxStreams:       maxStreams,
 		InDocker:         inDocker,
 		Debug:            debug,
 		DevReusableToken: devReusableToken,

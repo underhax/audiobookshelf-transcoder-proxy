@@ -18,5 +18,5 @@ ENV ABSTP_LISTEN_ADDR=0.0.0.0:8099
 ENV ABSTP_IN_DOCKER=true
 EXPOSE 8099
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD ["/app/abstp", "-healthcheck"]
+  CMD ["/app/abstp", "--healthcheck"]
 ENTRYPOINT ["/app/abstp"]

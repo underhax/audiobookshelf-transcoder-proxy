@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,39 @@ func TestValidateListenAddr(t *testing.T) {
 			err := ValidateListenAddr(tc.addr)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("ValidateListenAddr(%q) err = %v, wantErr = %v", tc.addr, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRequestPath(t *testing.T) {
+	t.Parallel()
+
+	longPath := "/" + strings.Repeat("a", 257)
+
+	tests := []struct {
+		name       string
+		path       string
+		requestURI string
+		wantErr    bool
+	}{
+		{name: "valid root", path: "/", requestURI: "/", wantErr: false},
+		{name: "valid api path", path: "/api/proxy/books", requestURI: "/api/proxy/books", wantErr: false},
+		{name: "valid stream with token", path: "/stream/sess_123.aac", requestURI: "/stream/sess_123.aac?token=abc", wantErr: false},
+		{name: "path too long", path: longPath, requestURI: longPath, wantErr: true},
+		{name: "double slash in uri", path: "/api/books", requestURI: "//api/books", wantErr: true},
+		{name: "path traversal in uri", path: "/api/books", requestURI: "/api/../books", wantErr: true},
+		{name: "invalid character space", path: "/api/ proxy", requestURI: "/api/ proxy", wantErr: true},
+		{name: "invalid character percent", path: "/api/%20", requestURI: "/api/%20", wantErr: true},
+		{name: "invalid character null", path: "/api/\x00", requestURI: "/api/\x00", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateRequestPath(tc.path, tc.requestURI)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ValidateRequestPath(%q, %q) err = %v, wantErr = %v", tc.path, tc.requestURI, err, tc.wantErr)
 			}
 		})
 	}

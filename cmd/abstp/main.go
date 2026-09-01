@@ -77,9 +77,9 @@ func printHelp(out io.Writer) {
 	text := "Audiobookshelf Transcoder Proxy (abstp)\n\n" +
 		"Usage:\n  abstp [flags]\n\n" +
 		"Flags:\n" +
-		"  -healthcheck   Perform liveness probe against running instance and exit\n" +
-		"  -version       Print application version and exit\n" +
-		"  -help          Display help information\n\n" +
+		"  -h, --help             Display help information and exit\n" +
+		"  -v, --version          Print application version and exit\n" +
+		"      --healthcheck      Perform liveness probe against running instance and exit\n\n" +
 		"Environment Variables:\n" +
 		"  ABSTP_ABS_URL          Audiobookshelf base URL (required, e.g. https://abs.example.org)\n" +
 		"  ABSTP_ABS_TOKEN        Audiobookshelf user/API token (required, or ABSTP_ABS_TOKEN_FILE)\n" +
@@ -91,6 +91,8 @@ func printHelp(out io.Writer) {
 		"  ABSTP_FFMPEG_PATH      Path to ffmpeg binary (default: ffmpeg)\n" +
 		"  ABSTP_TOKEN_TTL        Stream token TTL duration (default: 30s)\n" +
 		"  ABSTP_BUFFER_DURATION  Initial stream buffer duration (default: 10s)\n" +
+		"  ABSTP_MAX_CONNS        Max concurrent incoming HTTP connections (default: 100)\n" +
+		"  ABSTP_MAX_STREAMS      Max concurrent active transcoding streams (default: 5)\n" +
 		"  ABSTP_IN_DOCKER        Running inside Docker container (true/false, default: false)\n"
 	if _, err := io.WriteString(out, text); err != nil {
 		log.Printf("write help error: %v", err)

@@ -60,6 +60,33 @@ func newTestEnv(t *testing.T, roundTrip roundTripFunc) (*Handler, *session.Store
 	return h, store
 }
 
+func TestSecurityMiddleware_MaxConns(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		MaxConns:   1,
+		MaxStreams: 1,
+	}
+	h := NewHandler(cfg, nil, nil)
+	routes := h.Routes()
+
+	h.connsSem <- struct{}{}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/health", http.NoBody)
+	rec := httptest.NewRecorder()
+
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 Too Many Requests, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "server overloaded") {
+		t.Errorf("expected server overloaded message, got %s", rec.Body.String())
+	}
+
+	<-h.connsSem
+}
+
 type errResponseWriter struct{}
 
 func (e *errResponseWriter) Header() http.Header {
@@ -71,6 +98,62 @@ func (e *errResponseWriter) Write(_ []byte) (int, error) {
 }
 
 func (e *errResponseWriter) WriteHeader(_ int) {}
+
+func TestRoot(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	routes := h.Routes()
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+	if rec.Body.String() != "OK\n" {
+		t.Errorf("expected body OK\\n, got %q", rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain content type, got %s", ct)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); csp != "default-src 'none'; frame-ancestors 'none';" {
+		t.Errorf("unexpected CSP header: %q", csp)
+	}
+	if nosniff := rec.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Errorf("unexpected X-Content-Type-Options: %q", nosniff)
+	}
+	if frame := rec.Header().Get("X-Frame-Options"); frame != "DENY" {
+		t.Errorf("unexpected X-Frame-Options: %q", frame)
+	}
+}
+
+func TestRoot_WriteError(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	ew := &errResponseWriter{}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	h.HandleRoot(ew, req)
+}
+
+func TestFavicon(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	routes := h.Routes()
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/favicon.ico", http.NoBody)
+	rec := httptest.NewRecorder()
+
+	routes.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content, got %d", rec.Code)
+	}
+}
 
 func TestHealth(t *testing.T) {
 	t.Parallel()

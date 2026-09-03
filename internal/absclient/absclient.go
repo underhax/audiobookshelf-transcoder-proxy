@@ -251,14 +251,15 @@ type expandedItemResponse struct {
 	Media struct {
 		Episodes []rawEpisode `json:"episodes"`
 	} `json:"media"`
-	UserMediaProgress []rawEpisodeProgress `json:"userMediaProgress"`
+	UserMediaProgress json.RawMessage `json:"userMediaProgress"`
 }
 
 type rawEpisode struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	Season    string `json:"season"`
-	Episode   string `json:"episode"`
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Season    string  `json:"season"`
+	Episode   string  `json:"episode"`
+	Duration  float64 `json:"duration"`
 	AudioFile struct {
 		Duration float64 `json:"duration"`
 	} `json:"audioFile"`
@@ -417,10 +418,7 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 		return nil, fmt.Errorf("unmarshal podcast episodes response: %w", err)
 	}
 
-	progressMap := make(map[string]float64, len(resp.UserMediaProgress))
-	for _, p := range resp.UserMediaProgress {
-		progressMap[p.EpisodeID] = p.CurrentTime
-	}
+	progressMap := parseEpisodeProgressMap(resp.UserMediaProgress)
 
 	var episodes []PodcastEpisode
 	if len(resp.Media.Episodes) > 0 {
@@ -436,16 +434,50 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 			publishedAtStr = time.Unix(ts, 0).UTC().Format(time.RFC3339)
 		}
 
+		duration := ep.AudioFile.Duration
+		if duration <= 0 {
+			duration = ep.Duration
+		}
+
 		episodes = append(episodes, PodcastEpisode{
 			ID:          ep.ID,
 			Title:       ep.Title,
 			Season:      ep.Season,
 			Episode:     ep.Episode,
 			PublishedAt: publishedAtStr,
-			Duration:    ep.AudioFile.Duration,
+			Duration:    duration,
 			Progress:    progressMap[ep.ID],
 		})
 	}
 
 	return episodes, nil
+}
+
+func parseEpisodeProgressMap(raw json.RawMessage) map[string]float64 {
+	progressMap := make(map[string]float64)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return progressMap
+	}
+
+	if trimmed[0] == '{' {
+		var single rawEpisodeProgress
+		if err := json.Unmarshal(trimmed, &single); err == nil && single.EpisodeID != "" {
+			progressMap[single.EpisodeID] = single.CurrentTime
+		}
+		return progressMap
+	}
+
+	if trimmed[0] == '[' {
+		var list []rawEpisodeProgress
+		if err := json.Unmarshal(trimmed, &list); err == nil {
+			for _, p := range list {
+				if p.EpisodeID != "" {
+					progressMap[p.EpisodeID] = p.CurrentTime
+				}
+			}
+		}
+	}
+
+	return progressMap
 }

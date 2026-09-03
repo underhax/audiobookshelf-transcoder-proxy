@@ -73,6 +73,63 @@ func TestGetPodcastEpisodes(t *testing.T) {
 			wantISOFormat: true,
 		},
 		{
+			name:      "success with single object progress",
+			podcastID: "pod-single",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				respJSON := `{
+					"media": {
+						"episodes": [
+							{
+								"id": "ep-1",
+								"title": "Episode 1",
+								"duration": 1800.0
+							}
+						]
+					},
+					"userMediaProgress": {
+						"episodeId": "ep-1",
+						"currentTime": 420.0
+					}
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(respJSON)),
+				}, nil
+			},
+			wantErr:       false,
+			wantEpisodes:  1,
+			wantProgress:  420.0,
+			wantISOFormat: false,
+		},
+		{
+			name:      "success with null progress",
+			podcastID: "pod-null",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				respJSON := `{
+					"media": {
+						"episodes": [
+							{
+								"id": "ep-1",
+								"title": "Episode 1",
+								"duration": 1800.0
+							}
+						]
+					},
+					"userMediaProgress": null
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(respJSON)),
+				}, nil
+			},
+			wantErr:       false,
+			wantEpisodes:  1,
+			wantProgress:  0.0,
+			wantISOFormat: false,
+		},
+		{
 			name:      "status non-200",
 			podcastID: "pod-err",
 			mockFn: func(_ *http.Request) (*http.Response, error) {

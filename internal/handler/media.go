@@ -78,6 +78,24 @@ func (h *Handler) HandleGetInProgress(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleGetBookChapters returns chapter markers and durations for a specific audiobook.
+func (h *Handler) HandleGetBookChapters(w http.ResponseWriter, r *http.Request) {
+	bookID := r.PathValue("book_id")
+	chapters, err := h.absClient.GetBookChapters(r.Context(), bookID)
+	if err != nil {
+		log.Printf("get book chapters failed: %v", err)
+		http.Error(w, `{"error":"failed to get book chapters"}`, http.StatusBadGateway)
+		return
+	}
+	if chapters == nil {
+		chapters = []absclient.ChapterItem{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(chapters); err != nil {
+		log.Printf("encode book chapters error: %v", err)
+	}
+}
+
 // HandleGetCover proxies the cover artwork from Audiobookshelf with HTTP caching headers.
 func (h *Handler) HandleGetCover(w http.ResponseWriter, r *http.Request) {
 	itemID := r.PathValue("item_id")

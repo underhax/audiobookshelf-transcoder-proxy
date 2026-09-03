@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -230,6 +231,7 @@ type MediaItem struct {
 	ID        string  `json:"id"`
 	Title     string  `json:"title"`
 	Author    string  `json:"author,omitempty"`
+	Narrator  string  `json:"narrator,omitempty"`
 	MediaType string  `json:"mediaType"`
 	CoverURL  string  `json:"coverUrl"`
 	Duration  float64 `json:"duration"`
@@ -252,6 +254,7 @@ type InProgressItem struct {
 	ID           string  `json:"id"`
 	Title        string  `json:"title"`
 	Author       string  `json:"author,omitempty"`
+	Narrator     string  `json:"narrator,omitempty"`
 	MediaType    string  `json:"mediaType"`
 	CoverURL     string  `json:"coverUrl"`
 	EpisodeID    string  `json:"episodeId,omitempty"`
@@ -259,6 +262,28 @@ type InProgressItem struct {
 	Duration     float64 `json:"duration"`
 	Progress     float64 `json:"progress"`
 	CurrentTime  float64 `json:"currentTime"`
+}
+
+// ChapterItem represents a single chapter or track within an audiobook.
+type ChapterItem struct {
+	Title    string  `json:"title"`
+	Start    float64 `json:"start"`
+	End      float64 `json:"end"`
+	Duration float64 `json:"duration"`
+	ID       int     `json:"id"`
+}
+
+type bookExpandedResponse struct {
+	Media struct {
+		Chapters []rawChapter `json:"chapters"`
+	} `json:"media"`
+}
+
+type rawChapter struct {
+	Title string  `json:"title"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	ID    int     `json:"id"`
 }
 
 type itemsInProgressResponse struct {
@@ -280,9 +305,10 @@ type rawInProgressLibraryItem struct {
 	MediaType     string                `json:"mediaType"`
 	Media         struct {
 		Metadata struct {
-			Title      string `json:"title"`
-			AuthorName string `json:"authorName"`
-			Author     string `json:"author"`
+			Title        string `json:"title"`
+			AuthorName   string `json:"authorName"`
+			Author       string `json:"author"`
+			NarratorName string `json:"narratorName"`
 		} `json:"metadata"`
 		Duration float64 `json:"duration"`
 	} `json:"media"`
@@ -338,8 +364,9 @@ type libraryItemsResponse struct {
 		ID    string `json:"id"`
 		Media struct {
 			Metadata struct {
-				Title      string `json:"title"`
-				AuthorName string `json:"authorName"`
+				Title        string `json:"title"`
+				AuthorName   string `json:"authorName"`
+				NarratorName string `json:"narratorName"`
 			} `json:"metadata"`
 			Duration float64 `json:"duration"`
 		} `json:"media"`
@@ -410,6 +437,7 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 				ID:        it.ID,
 				Title:     it.Media.Metadata.Title,
 				Author:    it.Media.Metadata.AuthorName,
+				Narrator:  it.Media.Metadata.NarratorName,
 				MediaType: lib.MediaType,
 				Duration:  it.Media.Duration,
 				Progress:  progress,
@@ -612,6 +640,7 @@ func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[str
 		ID:        it.ID,
 		Title:     it.Media.Metadata.Title,
 		Author:    author,
+		Narrator:  it.Media.Metadata.NarratorName,
 		MediaType: it.MediaType,
 		CoverURL:  "/api/proxy/covers/" + it.ID,
 		Duration:  it.Media.Duration,
@@ -657,4 +686,50 @@ func populatePodcastInProgress(item *InProgressItem, it *rawInProgressLibraryIte
 		item.CurrentTime = prog.CurrentTime
 		item.Progress = prog.CurrentTime
 	}
+}
+
+// GetBookChapters retrieves chapter markers and timestamps for a specific audiobook.
+func (c *Client) GetBookChapters(ctx context.Context, bookID string) ([]ChapterItem, error) {
+	if bookID == "" {
+		return nil, errors.New("book ID cannot be empty")
+	}
+
+	req, err := c.newRequest(ctx, http.MethodGet, "/api/items/"+url.PathEscape(bookID)+"?expanded=1", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	status, body, err := c.sendAndReadBody(req)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("get book chapters failed with status %d: %s", status, string(body))
+	}
+
+	var resp bookExpandedResponse
+	if unmarshalErr := json.Unmarshal(body, &resp); unmarshalErr != nil {
+		return nil, fmt.Errorf("unmarshal book chapters response: %w", unmarshalErr)
+	}
+
+	if len(resp.Media.Chapters) == 0 {
+		return nil, nil
+	}
+
+	chapters := make([]ChapterItem, len(resp.Media.Chapters))
+	for i, ch := range resp.Media.Chapters {
+		dur := ch.End - ch.Start
+		if dur < 0 {
+			dur = 0
+		}
+		chapters[i] = ChapterItem{
+			Title:    ch.Title,
+			Start:    ch.Start,
+			End:      ch.End,
+			Duration: dur,
+			ID:       ch.ID,
+		}
+	}
+
+	return chapters, nil
 }

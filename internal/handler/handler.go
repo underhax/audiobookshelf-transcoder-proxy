@@ -64,6 +64,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /favicon.ico", h.HandleFavicon)
 	mux.HandleFunc("GET /health", h.HandleHealth)
 	mux.HandleFunc("GET /api/proxy/books", h.requireAuth(h.HandleGetBooks))
+	mux.HandleFunc("GET /api/proxy/books/{book_id}/chapters", h.requireAuth(h.HandleGetBookChapters))
 	mux.HandleFunc("GET /api/proxy/podcasts", h.requireAuth(h.HandleGetPodcasts))
 	mux.HandleFunc("GET /api/proxy/podcasts/{podcast_id}/episodes", h.requireAuth(h.HandleGetPodcastEpisodes))
 	mux.HandleFunc("GET /api/proxy/in-progress", h.requireAuth(h.HandleGetInProgress))

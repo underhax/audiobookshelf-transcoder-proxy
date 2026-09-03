@@ -589,3 +589,102 @@ func inProgressMockTransport(itemsCode int, itemsResp string, progressCode int, 
 		}
 	}
 }
+
+func TestGetBookChapters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		transportErr roundTripFunc
+		name         string
+		bookID       string
+		respBody     string
+		respCode     int
+		wantCount    int
+		wantDuration float64
+		wantErr      bool
+	}{
+		{
+			name:    "empty book id",
+			bookID:  "",
+			wantErr: true,
+		},
+		{
+			name:         "success with chapters",
+			bookID:       "book-ch-1",
+			respBody:     `{"media":{"chapters":[{"id":0,"title":"Chapter 1","start":0,"end":120.5},{"id":1,"title":"Chapter 2","start":120.5,"end":300.0},{"id":2,"title":"Chapter 3","start":400.0,"end":350.0}]}}`,
+			wantCount:    3,
+			wantDuration: 120.5,
+		},
+		{
+			name:      "empty chapters array returns nil",
+			bookID:    "book-ch-empty",
+			respBody:  `{"media":{"chapters":[]}}`,
+			wantCount: 0,
+		},
+		{
+			name:     "upstream server error",
+			bookID:   "book-ch-err",
+			respCode: http.StatusInternalServerError,
+			respBody: "internal error",
+			wantErr:  true,
+		},
+		{
+			name:     "invalid json response",
+			bookID:   "book-ch-badjson",
+			respBody: "{broken",
+			wantErr:  true,
+		},
+		{
+			name:   "transport failure",
+			bookID: "book-ch-transport",
+			transportErr: func(_ *http.Request) (*http.Response, error) {
+				return nil, errors.New("network failure")
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mockFn := tt.transportErr
+			if mockFn == nil {
+				mockFn = func(req *http.Request) (*http.Response, error) {
+					expectedPath := "/api/items/" + tt.bookID
+					if req.URL.Path != expectedPath {
+						t.Errorf("unexpected path %s, want %s", req.URL.Path, expectedPath)
+					}
+					code := tt.respCode
+					if code == 0 {
+						code = http.StatusOK
+					}
+					return &http.Response{
+						StatusCode: code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(tt.respBody)),
+					}, nil
+				}
+			}
+
+			c := New("http://abs.example.org", "tok", "1.0.0", newMockHTTPClient(mockFn))
+			chapters, err := c.GetBookChapters(context.Background(), tt.bookID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetBookChapters() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(chapters) != tt.wantCount {
+				t.Errorf("got %d chapters, want %d", len(chapters), tt.wantCount)
+			}
+			if len(chapters) > 0 && chapters[0].Duration != tt.wantDuration {
+				t.Errorf("chapters[0].Duration = %v, want %v", chapters[0].Duration, tt.wantDuration)
+			}
+		})
+	}
+
+	cBad := New("http://[::1]:namedport", "tok", "1.0.0", nil)
+	if _, err := cBad.GetBookChapters(context.Background(), "book-1"); err == nil {
+		t.Error("expected error on invalid URL")
+	}
+}

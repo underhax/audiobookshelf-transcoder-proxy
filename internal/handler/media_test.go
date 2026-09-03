@@ -385,3 +385,99 @@ func TestGetInProgress(t *testing.T) {
 		h.HandleGetInProgress(ew, req)
 	})
 }
+
+func TestGetBookChapters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		bookID   string
+		respBody string
+		wantBody string
+		respCode int
+		wantCode int
+		withAuth bool
+	}{
+		{
+			name:     "unauthorized request",
+			bookID:   "book-1",
+			wantCode: http.StatusUnauthorized,
+			withAuth: false,
+		},
+		{
+			name:     "success with chapters",
+			bookID:   "book-1",
+			respBody: `{"media":{"chapters":[{"id":0,"title":"Chapter 1","start":0,"end":120.5}]}}`,
+			wantBody: "Chapter 1",
+			wantCode: http.StatusOK,
+			withAuth: true,
+		},
+		{
+			name:     "upstream error",
+			bookID:   "book-err",
+			respBody: "internal error",
+			respCode: http.StatusInternalServerError,
+			wantCode: http.StatusBadGateway,
+			withAuth: true,
+		},
+		{
+			name:     "empty chapters list",
+			bookID:   "book-empty",
+			respBody: `{"media":{"chapters":[]}}`,
+			wantBody: "[]",
+			wantCode: http.StatusOK,
+			withAuth: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mockFn := func(_ *http.Request) (*http.Response, error) {
+				code := tt.respCode
+				if code == 0 {
+					code = http.StatusOK
+				}
+				return &http.Response{
+					StatusCode: code,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tt.respBody)),
+				}, nil
+			}
+
+			h, _ := newTestEnv(t, mockFn)
+			routes := h.Routes()
+
+			path := "/api/proxy/books/" + tt.bookID + "/chapters"
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody)
+			if tt.withAuth {
+				req.Header.Set("Authorization", "Bearer proxy-secret-key")
+			}
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("expected code %d, got %d", tt.wantCode, rec.Code)
+			}
+			if tt.wantBody != "" && !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Errorf("expected %s in body, got %s", tt.wantBody, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("encode error", func(t *testing.T) {
+		t.Parallel()
+		mockFn := func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"media":{"chapters":[{"id":0,"title":"Ch Enc","start":0,"end":10}]}}`)),
+			}, nil
+		}
+		h, _ := newTestEnv(t, mockFn)
+		ew := &errResponseWriter{}
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/proxy/books/book-1/chapters", http.NoBody)
+		req.SetPathValue("book_id", "book-1")
+		h.HandleGetBookChapters(ew, req)
+	})
+}

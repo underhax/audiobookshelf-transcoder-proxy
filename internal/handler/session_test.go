@@ -202,14 +202,14 @@ func TestSessionStart_Metadata(t *testing.T) {
 					DisplayTitle:  "ABS Title",
 					DisplayAuthor: "ABS Author",
 					MediaMetadata: &struct {
-						Title        string `json:"title"`
-						AuthorName   string `json:"authorName"`
-						Author       string `json:"author"`
-						NarratorName string `json:"narratorName"`
+						Title        string   `json:"title"`
+						AuthorName   string   `json:"authorName"`
+						Author       string   `json:"author"`
+						NarratorName string   `json:"narratorName"`
+						Narrators    []string `json:"narrators"`
 					}{
-						Title:        "Meta Title",
-						AuthorName:   "Meta Author",
-						NarratorName: "Meta Narrator",
+						Title:     "Meta Title",
+						Narrators: []string{"Meta Narrator"},
 					},
 					AudioTracks: []absclient.AudioTrack{
 						{Index: 0, Duration: 100.0, ContentURL: "/meta-track.mp3"},

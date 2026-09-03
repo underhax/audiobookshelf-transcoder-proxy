@@ -542,10 +542,11 @@ func TestExtractTitle(t *testing.T) {
 			name:     "fallback to MediaMetadata title",
 			reqTitle: "",
 			resp: &absclient.PlayResponse{MediaMetadata: &struct {
-				Title        string `json:"title"`
-				AuthorName   string `json:"authorName"`
-				Author       string `json:"author"`
-				NarratorName string `json:"narratorName"`
+				Title        string   `json:"title"`
+				AuthorName   string   `json:"authorName"`
+				Author       string   `json:"author"`
+				NarratorName string   `json:"narratorName"`
+				Narrators    []string `json:"narrators"`
 			}{Title: "Meta Only"}},
 			want: "Meta Only",
 		},
@@ -580,10 +581,11 @@ func TestExtractAuthor(t *testing.T) {
 			name:      "fallback to MediaMetadata Author field",
 			reqAuthor: "",
 			resp: &absclient.PlayResponse{MediaMetadata: &struct {
-				Title        string `json:"title"`
-				AuthorName   string `json:"authorName"`
-				Author       string `json:"author"`
-				NarratorName string `json:"narratorName"`
+				Title        string   `json:"title"`
+				AuthorName   string   `json:"authorName"`
+				Author       string   `json:"author"`
+				NarratorName string   `json:"narratorName"`
+				Narrators    []string `json:"narrators"`
 			}{Author: "Fallback Author"}},
 			want: "Fallback Author",
 		},
@@ -591,10 +593,11 @@ func TestExtractAuthor(t *testing.T) {
 			name:      "fallback to MediaMetadata AuthorName field",
 			reqAuthor: "",
 			resp: &absclient.PlayResponse{MediaMetadata: &struct {
-				Title        string `json:"title"`
-				AuthorName   string `json:"authorName"`
-				Author       string `json:"author"`
-				NarratorName string `json:"narratorName"`
+				Title        string   `json:"title"`
+				AuthorName   string   `json:"authorName"`
+				Author       string   `json:"author"`
+				NarratorName string   `json:"narratorName"`
+				Narrators    []string `json:"narrators"`
 			}{AuthorName: "Meta AuthorName"}},
 			want: "Meta AuthorName",
 		},
@@ -611,6 +614,97 @@ func TestExtractAuthor(t *testing.T) {
 			t.Parallel()
 			if got := extractAuthor(tt.reqAuthor, tt.resp); got != tt.want {
 				t.Errorf("extractAuthor() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractNarrator(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		resp        *absclient.PlayResponse
+		name        string
+		reqNarrator string
+		want        string
+	}{
+		{
+			name:        "explicit request narrator takes precedence",
+			reqNarrator: "Explicit Narrator",
+			resp:        &absclient.PlayResponse{},
+			want:        "Explicit Narrator",
+		},
+		{
+			name:        "extract from MediaMetadata Narrators slice",
+			reqNarrator: "",
+			resp: &absclient.PlayResponse{
+				MediaMetadata: &struct {
+					Title        string   `json:"title"`
+					AuthorName   string   `json:"authorName"`
+					Author       string   `json:"author"`
+					NarratorName string   `json:"narratorName"`
+					Narrators    []string `json:"narrators"`
+				}{
+					Narrators: []string{"First Narrator", "Second Narrator"},
+				},
+			},
+			want: "First Narrator, Second Narrator",
+		},
+		{
+			name:        "fallback to MediaMetadata NarratorName string",
+			reqNarrator: "",
+			resp: &absclient.PlayResponse{
+				MediaMetadata: &struct {
+					Title        string   `json:"title"`
+					AuthorName   string   `json:"authorName"`
+					Author       string   `json:"author"`
+					NarratorName string   `json:"narratorName"`
+					Narrators    []string `json:"narrators"`
+				}{
+					NarratorName: "Fallback Single Narrator",
+				},
+			},
+			want: "Fallback Single Narrator",
+		},
+		{
+			name:        "fallback to LibraryItem Media Metadata NarratorName",
+			reqNarrator: "",
+			resp: &absclient.PlayResponse{
+				LibraryItem: &struct {
+					Media struct {
+						Metadata struct {
+							NarratorName string `json:"narratorName"`
+						} `json:"metadata"`
+					} `json:"media"`
+				}{
+					Media: struct {
+						Metadata struct {
+							NarratorName string `json:"narratorName"`
+						} `json:"metadata"`
+					}{
+						Metadata: struct {
+							NarratorName string `json:"narratorName"`
+						}{
+							NarratorName: "LibItem Narrator",
+						},
+					},
+				},
+			},
+			want: "LibItem Narrator",
+		},
+		{
+			name:        "empty when no narrator anywhere",
+			reqNarrator: "",
+			resp:        &absclient.PlayResponse{},
+			want:        "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractNarrator(tt.reqNarrator, tt.resp); got != tt.want {
+				t.Errorf("extractNarrator() = %q, want %q", got, tt.want)
 			}
 		})
 	}

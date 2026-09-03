@@ -604,15 +604,28 @@ func extractAuthor(reqAuthor string, playResp *absclient.PlayResponse) string {
 	return ""
 }
 
+func extractNarrator(reqNarrator string, playResp *absclient.PlayResponse) string {
+	if reqNarrator != "" {
+		return cleanHeaderValue(reqNarrator)
+	}
+	if playResp.MediaMetadata != nil {
+		if len(playResp.MediaMetadata.Narrators) > 0 {
+			return cleanHeaderValue(strings.Join(playResp.MediaMetadata.Narrators, ", "))
+		}
+		if playResp.MediaMetadata.NarratorName != "" {
+			return cleanHeaderValue(playResp.MediaMetadata.NarratorName)
+		}
+	}
+	if playResp.LibraryItem != nil && playResp.LibraryItem.Media.Metadata.NarratorName != "" {
+		return cleanHeaderValue(playResp.LibraryItem.Media.Metadata.NarratorName)
+	}
+	return ""
+}
+
 func resolveSessionMetadata(req *StartSessionRequest, playResp *absclient.PlayResponse) sessionMeta {
 	mType := req.MediaType
 	if mType == "" {
 		mType = playResp.MediaType
-	}
-
-	narr := cleanHeaderValue(req.Narrator)
-	if narr == "" && playResp.MediaMetadata != nil {
-		narr = cleanHeaderValue(playResp.MediaMetadata.NarratorName)
 	}
 
 	epTitle := cleanHeaderValue(req.EpisodeTitle)
@@ -623,7 +636,7 @@ func resolveSessionMetadata(req *StartSessionRequest, playResp *absclient.PlayRe
 	return sessionMeta{
 		title:        extractTitle(req.Title, playResp),
 		author:       extractAuthor(req.Author, playResp),
-		narrator:     narr,
+		narrator:     extractNarrator(req.Narrator, playResp),
 		episodeTitle: epTitle,
 		mediaType:    mType,
 	}

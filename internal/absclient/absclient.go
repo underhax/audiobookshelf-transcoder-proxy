@@ -247,6 +247,61 @@ type PodcastEpisode struct {
 	Progress    float64 `json:"progress"`
 }
 
+// InProgressItem represents an audiobook or podcast episode currently in progress for the authenticated user.
+type InProgressItem struct {
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	Author       string  `json:"author,omitempty"`
+	MediaType    string  `json:"mediaType"`
+	CoverURL     string  `json:"coverUrl"`
+	EpisodeID    string  `json:"episodeId,omitempty"`
+	EpisodeTitle string  `json:"episodeTitle,omitempty"`
+	Duration     float64 `json:"duration"`
+	Progress     float64 `json:"progress"`
+	CurrentTime  float64 `json:"currentTime"`
+}
+
+type itemsInProgressResponse struct {
+	LibraryItems []rawInProgressLibraryItem `json:"libraryItems"`
+}
+
+type rawInProgressEpisode struct {
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	Duration  float64 `json:"duration"`
+	AudioFile struct {
+		Duration float64 `json:"duration"`
+	} `json:"audioFile"`
+}
+
+type rawInProgressLibraryItem struct {
+	RecentEpisode *rawInProgressEpisode `json:"recentEpisode"`
+	ID            string                `json:"id"`
+	MediaType     string                `json:"mediaType"`
+	Media         struct {
+		Metadata struct {
+			Title      string `json:"title"`
+			AuthorName string `json:"authorName"`
+			Author     string `json:"author"`
+		} `json:"metadata"`
+		Duration float64 `json:"duration"`
+	} `json:"media"`
+	ProgressLastUpdate int64 `json:"progressLastUpdate"`
+}
+
+type mediaProgressListResponse struct {
+	MediaProgress []rawMediaProgressEntry `json:"mediaProgress"`
+}
+
+type rawMediaProgressEntry struct {
+	LibraryItemID string  `json:"libraryItemId"`
+	EpisodeID     string  `json:"episodeId"`
+	CurrentTime   float64 `json:"currentTime"`
+	Duration      float64 `json:"duration"`
+	Progress      float64 `json:"progress"`
+	IsFinished    bool    `json:"isFinished"`
+}
+
 type expandedItemResponse struct {
 	Media struct {
 		Episodes []rawEpisode `json:"episodes"`
@@ -480,4 +535,126 @@ func parseEpisodeProgressMap(raw json.RawMessage) map[string]float64 {
 	}
 
 	return progressMap
+}
+
+// GetInProgressItems retrieves currently active audiobooks and podcast episodes with user playback positions.
+func (c *Client) GetInProgressItems(ctx context.Context) ([]InProgressItem, error) {
+	reqItems, err := c.newRequest(ctx, http.MethodGet, "/api/me/items-in-progress", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	status, body, err := c.sendAndReadBody(reqItems)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("get items in progress failed with status %d: %s", status, string(body))
+	}
+
+	var inProgResp itemsInProgressResponse
+	if unmarshalErr := json.Unmarshal(body, &inProgResp); unmarshalErr != nil {
+		return nil, fmt.Errorf("unmarshal items in progress response: %w", unmarshalErr)
+	}
+
+	if len(inProgResp.LibraryItems) == 0 {
+		return nil, nil
+	}
+
+	byItem, byEpisode := c.fetchProgressLookups(ctx)
+
+	items := make([]InProgressItem, len(inProgResp.LibraryItems))
+	for i := range inProgResp.LibraryItems {
+		items[i] = buildInProgressItem(&inProgResp.LibraryItems[i], byItem, byEpisode)
+	}
+
+	return items, nil
+}
+
+func (c *Client) fetchProgressLookups(ctx context.Context) (byItem, byEpisode map[string]rawMediaProgressEntry) {
+	byItem = make(map[string]rawMediaProgressEntry)
+	byEpisode = make(map[string]rawMediaProgressEntry)
+
+	reqProg, err := c.newRequest(ctx, http.MethodGet, "/api/me/progress", nil)
+	if err != nil {
+		return byItem, byEpisode
+	}
+
+	pStatus, pBody, pErr := c.sendAndReadBody(reqProg)
+	if pErr != nil || pStatus != http.StatusOK {
+		return byItem, byEpisode
+	}
+
+	var progResp mediaProgressListResponse
+	if json.Unmarshal(pBody, &progResp) != nil {
+		return byItem, byEpisode
+	}
+
+	for _, p := range progResp.MediaProgress {
+		if p.EpisodeID != "" {
+			byEpisode[p.EpisodeID] = p
+		}
+		if p.LibraryItemID != "" {
+			byItem[p.LibraryItemID] = p
+		}
+	}
+
+	return byItem, byEpisode
+}
+
+func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[string]rawMediaProgressEntry) InProgressItem {
+	author := it.Media.Metadata.AuthorName
+	if author == "" {
+		author = it.Media.Metadata.Author
+	}
+
+	item := InProgressItem{
+		ID:        it.ID,
+		Title:     it.Media.Metadata.Title,
+		Author:    author,
+		MediaType: it.MediaType,
+		CoverURL:  "/api/proxy/covers/" + it.ID,
+		Duration:  it.Media.Duration,
+	}
+
+	if it.MediaType == "podcast" && it.RecentEpisode != nil {
+		populatePodcastInProgress(&item, it, byItem, byEpisode)
+		return item
+	}
+
+	if prog, ok := byItem[it.ID]; ok {
+		item.CurrentTime = prog.CurrentTime
+		item.Progress = prog.CurrentTime
+		if prog.Duration > 0 && item.Duration <= 0 {
+			item.Duration = prog.Duration
+		}
+	}
+
+	return item
+}
+
+func populatePodcastInProgress(item *InProgressItem, it *rawInProgressLibraryItem, byItem, byEpisode map[string]rawMediaProgressEntry) {
+	item.EpisodeID = it.RecentEpisode.ID
+	item.EpisodeTitle = it.RecentEpisode.Title
+	epDur := it.RecentEpisode.Duration
+	if epDur <= 0 {
+		epDur = it.RecentEpisode.AudioFile.Duration
+	}
+	if epDur > 0 {
+		item.Duration = epDur
+	}
+
+	if prog, ok := byEpisode[item.EpisodeID]; ok {
+		item.CurrentTime = prog.CurrentTime
+		item.Progress = prog.CurrentTime
+		if prog.Duration > 0 && item.Duration <= 0 {
+			item.Duration = prog.Duration
+		}
+		return
+	}
+
+	if prog, ok := byItem[it.ID]; ok {
+		item.CurrentTime = prog.CurrentTime
+		item.Progress = prog.CurrentTime
+	}
 }

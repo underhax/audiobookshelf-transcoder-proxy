@@ -430,3 +430,162 @@ func TestGetCover(t *testing.T) {
 		t.Error("expected error on invalid URL")
 	}
 }
+
+func TestGetInProgressItems(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		transportErr roundTripFunc
+		name         string
+		itemsResp    string
+		progressResp string
+		itemsCode    int
+		progressCode int
+		wantItems    int
+		wantDuration float64
+		wantProgress float64
+		wantErr      bool
+	}{
+		{
+			name:         "success with merged items",
+			itemsResp:    `{"libraryItems":[{"id":"book-1","mediaType":"book","media":{"duration":1000.0,"metadata":{"title":"Book Title","authorName":"Book Author"}}},{"id":"pod-1","mediaType":"podcast","media":{"metadata":{"title":"Pod Title","author":"Pod Host"}},"recentEpisode":{"id":"ep-1","title":"Ep Title","duration":500.0}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"book-1","currentTime":250.0,"duration":1000.0},{"libraryItemId":"pod-1","episodeId":"ep-1","currentTime":125.0,"duration":500.0}]}`,
+			wantItems:    2,
+			wantDuration: 1000.0,
+			wantProgress: 250.0,
+		},
+		{
+			name:      "error from items-in-progress endpoint",
+			itemsCode: http.StatusInternalServerError,
+			itemsResp: "server failure",
+			wantErr:   true,
+		},
+		{
+			name:      "invalid json from items-in-progress",
+			itemsResp: "{invalid json",
+			wantErr:   true,
+		},
+		{
+			name: "transport error",
+			transportErr: func(_ *http.Request) (*http.Response, error) {
+				return nil, errors.New("network down")
+			},
+			wantErr: true,
+		},
+		{
+			name:         "progress endpoint returns 500 gracefully",
+			itemsResp:    `{"libraryItems":[{"id":"bk-2","mediaType":"book","media":{"duration":600.0,"metadata":{"title":"Fallback Book","authorName":"FB Author"}}}]}`,
+			progressCode: http.StatusInternalServerError,
+			progressResp: "fail",
+			wantItems:    1,
+			wantDuration: 600.0,
+		},
+		{
+			name:         "progress endpoint returns invalid json",
+			itemsResp:    `{"libraryItems":[{"id":"bk-3","mediaType":"book","media":{"duration":700.0,"metadata":{"title":"Bad Progress Book","author":"BP Author"}}}]}`,
+			progressResp: "{broken",
+			wantItems:    1,
+			wantDuration: 700.0,
+		},
+		{
+			name:         "podcast with audioFile duration fallback",
+			itemsResp:    `{"libraryItems":[{"id":"pod-af","mediaType":"podcast","media":{"metadata":{"title":"AF Pod","author":"AF Host"}},"recentEpisode":{"id":"ep-af","title":"AF Ep","duration":0,"audioFile":{"duration":360.0}}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"pod-af","episodeId":"ep-af","currentTime":90.0,"duration":0}]}`,
+			wantItems:    1,
+			wantDuration: 360.0,
+			wantProgress: 90.0,
+		},
+		{
+			name:         "podcast episode duration from progress when zero locally",
+			itemsResp:    `{"libraryItems":[{"id":"pod-pd","mediaType":"podcast","media":{"metadata":{"title":"PD Pod","author":"PD Host"}},"recentEpisode":{"id":"ep-pd","title":"PD Ep","duration":0,"audioFile":{"duration":0}}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"pod-pd","episodeId":"ep-pd","currentTime":50.0,"duration":400.0}]}`,
+			wantItems:    1,
+			wantDuration: 400.0,
+			wantProgress: 50.0,
+		},
+		{
+			name:         "podcast fallback to byItem when episode not in progress map",
+			itemsResp:    `{"libraryItems":[{"id":"pod-fb","mediaType":"podcast","media":{"metadata":{"title":"FB Pod","author":"FB Host"}},"recentEpisode":{"id":"ep-fb","title":"FB Ep","duration":300.0}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"pod-fb","currentTime":75.0,"duration":300.0}]}`,
+			wantItems:    1,
+			wantDuration: 300.0,
+			wantProgress: 75.0,
+		},
+		{
+			name:         "book with duration fallback from progress",
+			itemsResp:    `{"libraryItems":[{"id":"bk-df","mediaType":"book","media":{"duration":0,"metadata":{"title":"DF Book","authorName":"DF Author"}}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"bk-df","currentTime":30.0,"duration":900.0}]}`,
+			wantItems:    1,
+			wantDuration: 900.0,
+			wantProgress: 30.0,
+		},
+		{
+			name:         "empty library items returns empty slice",
+			itemsResp:    `{"libraryItems":[]}`,
+			progressResp: `{"mediaProgress":[]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var mockFn roundTripFunc
+			if tt.transportErr != nil {
+				mockFn = tt.transportErr
+			} else {
+				iCode := tt.itemsCode
+				if iCode == 0 {
+					iCode = http.StatusOK
+				}
+				pCode := tt.progressCode
+				if pCode == 0 {
+					pCode = http.StatusOK
+				}
+				mockFn = inProgressMockTransport(iCode, tt.itemsResp, pCode, tt.progressResp)
+			}
+			c := New("http://abs.example.org", "tok", "1.0.0", newMockHTTPClient(mockFn))
+			items, err := c.GetInProgressItems(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetInProgressItems() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(items) != tt.wantItems {
+				t.Errorf("got %d items, want %d", len(items), tt.wantItems)
+			}
+			if len(items) == 0 {
+				return
+			}
+			if items[0].Duration != tt.wantDuration {
+				t.Errorf("items[0].Duration = %v, want %v", items[0].Duration, tt.wantDuration)
+			}
+			if items[0].CurrentTime != tt.wantProgress {
+				t.Errorf("items[0].CurrentTime = %v, want %v", items[0].CurrentTime, tt.wantProgress)
+			}
+		})
+	}
+
+	cBad := New("http://[::1]:namedport", "tok", "1.0.0", nil)
+	if _, err := cBad.GetInProgressItems(context.Background()); err == nil {
+		t.Error("expected error on invalid URL")
+	}
+
+	byItem, byEpisode := cBad.fetchProgressLookups(context.Background())
+	if len(byItem) != 0 || len(byEpisode) != 0 {
+		t.Error("expected empty lookup maps on invalid URL")
+	}
+}
+
+func inProgressMockTransport(itemsCode int, itemsResp string, progressCode int, progressResp string) roundTripFunc {
+	return func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/me/items-in-progress":
+			return &http.Response{StatusCode: itemsCode, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(itemsResp))}, nil
+		case "/api/me/progress":
+			return &http.Response{StatusCode: progressCode, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(progressResp))}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}
+	}
+}

@@ -280,3 +280,108 @@ func TestGetCover_CloseError(t *testing.T) {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }
+
+func TestGetInProgress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		itemsResp string
+		wantBody  string
+		itemsCode int
+		wantCode  int
+		withAuth  bool
+	}{
+		{
+			name:     "unauthorized request",
+			wantCode: http.StatusUnauthorized,
+			withAuth: false,
+		},
+		{
+			name:      "success with active items",
+			itemsResp: `{"libraryItems":[{"id":"book-prog-1","mediaType":"book","media":{"duration":500.0,"metadata":{"title":"Active Book","authorName":"Author One"}},"progressLastUpdate":1788410384658},{"id":"pod-prog-1","mediaType":"podcast","media":{"metadata":{"title":"Active Podcast","author":"Podcaster"}},"recentEpisode":{"id":"ep-prog-1","title":"Recent Ep","duration":200.0},"progressLastUpdate":1788185905651}]}`,
+			wantBody:  "Active Book",
+			wantCode:  http.StatusOK,
+			withAuth:  true,
+		},
+		{
+			name:      "upstream error",
+			itemsResp: "err",
+			itemsCode: http.StatusInternalServerError,
+			wantCode:  http.StatusBadGateway,
+			withAuth:  true,
+		},
+		{
+			name:      "empty in-progress list",
+			itemsResp: `{"libraryItems":[]}`,
+			wantBody:  "[]",
+			wantCode:  http.StatusOK,
+			withAuth:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mockFn := func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/api/me/items-in-progress":
+					code := tt.itemsCode
+					if code == 0 {
+						code = http.StatusOK
+					}
+					return &http.Response{
+						StatusCode: code,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(tt.itemsResp)),
+					}, nil
+				case "/api/me/progress":
+					progJSON := `{"mediaProgress":[{"libraryItemId":"book-prog-1","currentTime":150.0,"duration":500.0,"progress":0.3},{"libraryItemId":"pod-prog-1","episodeId":"ep-prog-1","currentTime":80.0,"duration":200.0,"progress":0.4}]}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(progJSON)),
+					}, nil
+				default:
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(`{}`)),
+					}, nil
+				}
+			}
+
+			h, _ := newTestEnv(t, mockFn)
+			routes := h.Routes()
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/proxy/in-progress", http.NoBody)
+			if tt.withAuth {
+				req.Header.Set("Authorization", "Bearer proxy-secret-key")
+			}
+			rec := httptest.NewRecorder()
+			routes.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("expected code %d, got %d", tt.wantCode, rec.Code)
+			}
+			if tt.wantBody != "" && !strings.Contains(rec.Body.String(), tt.wantBody) {
+				t.Errorf("expected %s in body, got %s", tt.wantBody, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("encode error", func(t *testing.T) {
+		t.Parallel()
+		mockFn := func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"libraryItems":[{"id":"enc-1","mediaType":"book","media":{"duration":100,"metadata":{"title":"Enc Book","authorName":"Enc Author"}}}]}`)),
+			}, nil
+		}
+		h, _ := newTestEnv(t, mockFn)
+		ew := &errResponseWriter{}
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/proxy/in-progress", http.NoBody)
+		h.HandleGetInProgress(ew, req)
+	})
+}

@@ -61,6 +61,23 @@ func (h *Handler) HandleGetPodcastEpisodes(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// HandleGetInProgress delivers active audiobooks and podcast episodes with playback offsets.
+func (h *Handler) HandleGetInProgress(w http.ResponseWriter, r *http.Request) {
+	items, err := h.absClient.GetInProgressItems(r.Context())
+	if err != nil {
+		log.Printf("get in-progress items failed: %v", err)
+		http.Error(w, `{"error":"failed to get in-progress items"}`, http.StatusBadGateway)
+		return
+	}
+	if items == nil {
+		items = []absclient.InProgressItem{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		log.Printf("encode in-progress items error: %v", err)
+	}
+}
+
 // HandleGetCover proxies the cover artwork from Audiobookshelf with HTTP caching headers.
 func (h *Handler) HandleGetCover(w http.ResponseWriter, r *http.Request) {
 	itemID := r.PathValue("item_id")

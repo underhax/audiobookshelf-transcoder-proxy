@@ -24,8 +24,18 @@ type AudioTrack struct {
 
 // PlayResponse encapsulates the initial playback state and track inventory returned by Audiobookshelf.
 type PlayResponse struct {
+	MediaMetadata *struct {
+		Title        string `json:"title"`
+		AuthorName   string `json:"authorName"`
+		Author       string `json:"author"`
+		NarratorName string `json:"narratorName"`
+	} `json:"mediaMetadata"`
 	ID            string       `json:"id"`
 	LibraryItemID string       `json:"libraryItemId"`
+	DisplayTitle  string       `json:"displayTitle"`
+	DisplayAuthor string       `json:"displayAuthor"`
+	CoverPath     string       `json:"coverPath"`
+	MediaType     string       `json:"mediaType"`
 	AudioTracks   []AudioTrack `json:"audioTracks"`
 	CurrentTime   float64      `json:"currentTime"`
 	Duration      float64      `json:"duration"`

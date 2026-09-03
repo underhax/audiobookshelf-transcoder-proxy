@@ -23,14 +23,21 @@ import (
 
 // StartSessionRequest encapsulates client playback parameters including item identifiers, requested speed, and start position.
 type StartSessionRequest struct {
-	ItemID      string  `json:"itemId"`
-	SnakeItemID string  `json:"item_id"`
-	EpisodeID   string  `json:"episodeId,omitempty"`
-	SnakeEpID   string  `json:"episode_id,omitempty"`
-	CurrentTime float64 `json:"currentTime"`
-	SnakeTime   float64 `json:"current_time"`
-	Duration    float64 `json:"duration"`
-	Speed       float64 `json:"speed"`
+	ItemID       string  `json:"itemId"`
+	SnakeItemID  string  `json:"item_id"`
+	EpisodeID    string  `json:"episodeId,omitempty"`
+	SnakeEpID    string  `json:"episode_id,omitempty"`
+	Title        string  `json:"title,omitempty"`
+	Author       string  `json:"author,omitempty"`
+	Narrator     string  `json:"narrator,omitempty"`
+	EpisodeTitle string  `json:"episodeTitle,omitempty"`
+	SnakeEpTitle string  `json:"episode_title,omitempty"`
+	MediaType    string  `json:"mediaType,omitempty"`
+	SnakeMedType string  `json:"media_type,omitempty"`
+	CurrentTime  float64 `json:"currentTime"`
+	SnakeTime    float64 `json:"current_time"`
+	Duration     float64 `json:"duration"`
+	Speed        float64 `json:"speed"`
 }
 
 // StartSessionResponse delivers the single-use streaming URL and session metadata required for client audio playback.
@@ -56,29 +63,23 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ItemID == "" {
-		req.ItemID = req.SnakeItemID
-	}
-	if req.EpisodeID == "" {
-		req.EpisodeID = req.SnakeEpID
-	}
-	if req.CurrentTime == 0 && req.SnakeTime > 0 {
-		req.CurrentTime = req.SnakeTime
-	}
+	normalizeSessionRequest(&req)
 
 	if req.ItemID == "" {
 		http.Error(w, `{"error":"itemId is required"}`, http.StatusBadRequest)
 		return
 	}
 
-	if req.Speed <= 0 {
-		req.Speed = 1.0
-	}
-
 	playResp, err := h.absClient.StartSession(r.Context(), req.ItemID, req.EpisodeID)
 	if err != nil {
 		log.Printf("start abs session failed: %v", err)
 		http.Error(w, `{"error":"failed to start abs session"}`, http.StatusBadGateway)
+		return
+	}
+
+	externalBase, err := h.resolveExternalBaseURL(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return
 	}
 
@@ -93,11 +94,23 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seekOffset, trackIdx := calculateSeekOffset(playResp.AudioTracks, currentTime)
+	meta := resolveSessionMetadata(&req, playResp)
+
+	coverItem := req.ItemID
+	if playResp.LibraryItemID != "" {
+		coverItem = playResp.LibraryItemID
+	}
 
 	sess := &session.Session{
 		ID:                 playResp.ID,
-		ItemID:             req.ItemID,
+		ItemID:             coverItem,
 		EpisodeID:          req.EpisodeID,
+		Title:              meta.title,
+		Author:             meta.author,
+		Narrator:           meta.narrator,
+		EpisodeTitle:       meta.episodeTitle,
+		MediaType:          meta.mediaType,
+		CoverURL:           fmt.Sprintf("%s/api/proxy/covers/%s", externalBase, coverItem),
 		AudioTracks:        playResp.AudioTracks,
 		StartingTrackIndex: trackIdx,
 		SeekOffset:         seekOffset,
@@ -114,11 +127,6 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	externalBase, err := h.resolveExternalBaseURL(r)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-		return
-	}
 	streamURL := fmt.Sprintf("%s/stream/%s.aac?token=%s", externalBase, sess.ID, token)
 
 	if h.cfg.Debug {
@@ -210,6 +218,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "audio/aac")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
 	w.Header().Set("Accept-Ranges", "none")
+	h.writeICYHeaders(w, r, sess)
 
 	if isProbeRequest(r) {
 		if h.cfg.Debug {
@@ -521,4 +530,171 @@ func (h *Handler) handleSessionTerminate(w http.ResponseWriter, r *http.Request)
 	if _, err := w.Write([]byte(`{"status":"stopped"}`)); err != nil {
 		log.Printf("write terminate response error: %v", err)
 	}
+}
+
+func cleanHeaderValue(s string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 32 && r != '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(cleaned), " ")
+}
+
+type sessionMeta struct {
+	title        string
+	author       string
+	narrator     string
+	episodeTitle string
+	mediaType    string
+}
+
+func isPodcast(mediaType, episodeID string) bool {
+	return mediaType == "podcast" || episodeID != ""
+}
+
+func normalizeSessionRequest(req *StartSessionRequest) {
+	if req.ItemID == "" {
+		req.ItemID = req.SnakeItemID
+	}
+	if req.EpisodeID == "" {
+		req.EpisodeID = req.SnakeEpID
+	}
+	if req.EpisodeTitle == "" {
+		req.EpisodeTitle = req.SnakeEpTitle
+	}
+	if req.MediaType == "" {
+		req.MediaType = req.SnakeMedType
+	}
+	if req.CurrentTime == 0 && req.SnakeTime > 0 {
+		req.CurrentTime = req.SnakeTime
+	}
+	if req.Speed <= 0 {
+		req.Speed = 1.0
+	}
+}
+
+func extractTitle(reqTitle string, playResp *absclient.PlayResponse) string {
+	if reqTitle != "" {
+		return cleanHeaderValue(reqTitle)
+	}
+	if playResp.DisplayTitle != "" {
+		return cleanHeaderValue(playResp.DisplayTitle)
+	}
+	if playResp.MediaMetadata != nil {
+		return cleanHeaderValue(playResp.MediaMetadata.Title)
+	}
+	return ""
+}
+
+func extractAuthor(reqAuthor string, playResp *absclient.PlayResponse) string {
+	if reqAuthor != "" {
+		return cleanHeaderValue(reqAuthor)
+	}
+	if playResp.DisplayAuthor != "" {
+		return cleanHeaderValue(playResp.DisplayAuthor)
+	}
+	if playResp.MediaMetadata != nil {
+		if playResp.MediaMetadata.AuthorName != "" {
+			return cleanHeaderValue(playResp.MediaMetadata.AuthorName)
+		}
+		return cleanHeaderValue(playResp.MediaMetadata.Author)
+	}
+	return ""
+}
+
+func resolveSessionMetadata(req *StartSessionRequest, playResp *absclient.PlayResponse) sessionMeta {
+	mType := req.MediaType
+	if mType == "" {
+		mType = playResp.MediaType
+	}
+
+	narr := cleanHeaderValue(req.Narrator)
+	if narr == "" && playResp.MediaMetadata != nil {
+		narr = cleanHeaderValue(playResp.MediaMetadata.NarratorName)
+	}
+
+	epTitle := cleanHeaderValue(req.EpisodeTitle)
+	if epTitle == "" && isPodcast(mType, req.EpisodeID) {
+		epTitle = cleanHeaderValue(playResp.DisplayTitle)
+	}
+
+	return sessionMeta{
+		title:        extractTitle(req.Title, playResp),
+		author:       extractAuthor(req.Author, playResp),
+		narrator:     narr,
+		episodeTitle: epTitle,
+		mediaType:    mType,
+	}
+}
+
+func writePodcastICYHeaders(w http.ResponseWriter, sess *session.Session) {
+	w.Header().Set("icy-genre", "Podcast")
+
+	epTitle := cleanHeaderValue(sess.EpisodeTitle)
+	if epTitle == "" {
+		epTitle = cleanHeaderValue(sess.Title)
+	}
+	if epTitle == "" {
+		epTitle = "Podcast Episode"
+	}
+	w.Header().Set("icy-name", epTitle)
+
+	podTitle := cleanHeaderValue(sess.Title)
+	if podTitle == "" || podTitle == epTitle {
+		podTitle = cleanHeaderValue(sess.Author)
+	}
+	if podTitle != "" {
+		w.Header().Set("icy-description", podTitle)
+	}
+}
+
+func writeAudiobookICYHeaders(w http.ResponseWriter, sess *session.Session) {
+	w.Header().Set("icy-genre", "Audiobook")
+
+	title := cleanHeaderValue(sess.Title)
+	author := cleanHeaderValue(sess.Author)
+	narrator := cleanHeaderValue(sess.Narrator)
+
+	switch {
+	case title != "" && author != "" && narrator != "":
+		w.Header().Set("icy-name", fmt.Sprintf("%s • %s", title, author))
+		w.Header().Set("icy-description", narrator)
+	case title != "" && narrator != "":
+		w.Header().Set("icy-name", title)
+		w.Header().Set("icy-description", narrator)
+	case title != "" && author != "":
+		w.Header().Set("icy-name", title)
+		w.Header().Set("icy-description", author)
+	case title != "":
+		w.Header().Set("icy-name", title)
+	case author != "":
+		w.Header().Set("icy-name", author)
+	default:
+		w.Header().Set("icy-name", "Audiobook")
+	}
+}
+
+func (h *Handler) writeCoverICYHeaders(w http.ResponseWriter, r *http.Request, sess *session.Session) {
+	coverURL := sess.CoverURL
+	if coverURL == "" && sess.ItemID != "" {
+		if extBase, err := h.resolveExternalBaseURL(r); err == nil {
+			coverURL = fmt.Sprintf("%s/api/proxy/covers/%s", extBase, sess.ItemID)
+		}
+	}
+	if coverURL != "" {
+		cleanCover := cleanHeaderValue(coverURL)
+		w.Header().Set("icy-logo", cleanCover)
+		w.Header().Set("icy-url", cleanCover)
+	}
+}
+
+func (h *Handler) writeICYHeaders(w http.ResponseWriter, r *http.Request, sess *session.Session) {
+	if isPodcast(sess.MediaType, sess.EpisodeID) {
+		writePodcastICYHeaders(w, sess)
+	} else {
+		writeAudiobookICYHeaders(w, sess)
+	}
+	h.writeCoverICYHeaders(w, r, sess)
 }

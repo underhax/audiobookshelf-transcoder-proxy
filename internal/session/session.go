@@ -26,6 +26,12 @@ type Session struct {
 	ItemID             string
 	EpisodeID          string
 	Token              string
+	Title              string
+	Author             string
+	Narrator           string
+	EpisodeTitle       string
+	CoverURL           string
+	MediaType          string
 	AudioTracks        []absclient.AudioTrack
 	lastSyncBits       atomic.Uint64
 	BytesSent          atomic.Int64

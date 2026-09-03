@@ -179,6 +179,124 @@ func TestSessionStart(t *testing.T) {
 	}
 }
 
+func TestSessionStart_Metadata(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		roundTrip    roundTripFunc
+		name         string
+		body         string
+		wantID       string
+		wantTitle    string
+		wantAuthor   string
+		wantNarrator string
+		wantCover    string
+	}{
+		{
+			name: "session start populates metadata from play response and sets cover url",
+			body: `{"itemId":"book-meta-1","currentTime":10.0}`,
+			roundTrip: func(_ *http.Request) (*http.Response, error) {
+				res := absclient.PlayResponse{
+					ID:            "sess-meta-1",
+					LibraryItemID: "item-meta-lib",
+					DisplayTitle:  "ABS Title",
+					DisplayAuthor: "ABS Author",
+					MediaMetadata: &struct {
+						Title        string `json:"title"`
+						AuthorName   string `json:"authorName"`
+						Author       string `json:"author"`
+						NarratorName string `json:"narratorName"`
+					}{
+						Title:        "Meta Title",
+						AuthorName:   "Meta Author",
+						NarratorName: "Meta Narrator",
+					},
+					AudioTracks: []absclient.AudioTrack{
+						{Index: 0, Duration: 100.0, ContentURL: "/meta-track.mp3"},
+					},
+				}
+				data, err := json.Marshal(res)
+				if err != nil {
+					return nil, fmt.Errorf("marshal res: %w", err)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewReader(data)),
+				}, nil
+			},
+			wantID:       "sess-meta-1",
+			wantTitle:    "ABS Title",
+			wantAuthor:   "ABS Author",
+			wantNarrator: "Meta Narrator",
+			wantCover:    "http://proxy.example.org:8099/api/proxy/covers/item-meta-lib",
+		},
+		{
+			name: "session start with explicit request metadata",
+			body: `{"item_id":"book-req-1","title":"Req Title","author":"Req Author","narrator":"Req Narrator","episode_title":"Req Ep","media_type":"podcast"}`,
+			roundTrip: func(_ *http.Request) (*http.Response, error) {
+				res := absclient.PlayResponse{
+					ID: "sess-req-1",
+					AudioTracks: []absclient.AudioTrack{
+						{Index: 0, Duration: 50.0, ContentURL: "/req-track.mp3"},
+					},
+				}
+				data, err := json.Marshal(res)
+				if err != nil {
+					return nil, fmt.Errorf("marshal res: %w", err)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(bytes.NewReader(data)),
+				}, nil
+			},
+			wantID:       "sess-req-1",
+			wantTitle:    "Req Title",
+			wantAuthor:   "Req Author",
+			wantNarrator: "Req Narrator",
+			wantCover:    "http://proxy.example.org:8099/api/proxy/covers/book-req-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h, store := newTestEnv(t, tt.roundTrip)
+			routes := h.Routes()
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/proxy/session/start", strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer proxy-secret-key")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			routes.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			sess, ok := store.Get(tt.wantID)
+			if !ok {
+				t.Fatalf("session %s not found in store", tt.wantID)
+			}
+			if sess.Title != tt.wantTitle {
+				t.Errorf("sess.Title = %q, want %q", sess.Title, tt.wantTitle)
+			}
+			if sess.Author != tt.wantAuthor {
+				t.Errorf("sess.Author = %q, want %q", sess.Author, tt.wantAuthor)
+			}
+			if sess.Narrator != tt.wantNarrator {
+				t.Errorf("sess.Narrator = %q, want %q", sess.Narrator, tt.wantNarrator)
+			}
+			if sess.CoverURL != tt.wantCover {
+				t.Errorf("sess.CoverURL = %q, want %q", sess.CoverURL, tt.wantCover)
+			}
+		})
+	}
+}
+
 func TestSessionStart_StoreError(t *testing.T) {
 	t.Parallel()
 

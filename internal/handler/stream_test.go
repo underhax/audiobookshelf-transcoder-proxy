@@ -336,3 +336,282 @@ func TestDisconnectSync_Errors(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.HandleStream(rec, req)
 }
+
+func TestStream_ICYHeaders(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sess      *session.Session
+		name      string
+		method    string
+		wantName  string
+		wantDesc  string
+		wantLogo  string
+		isPodcast bool
+	}{
+		{
+			name:   "book with author narrator and title",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:       "sess-icy-full",
+				Title:    "Book Title",
+				Author:   "Author Name",
+				Narrator: "Narrator One",
+				CoverURL: "http://proxy.example.org/api/proxy/covers/book-1",
+			},
+			wantName: "Book Title • Author Name",
+			wantDesc: "Narrator One",
+			wantLogo: "http://proxy.example.org/api/proxy/covers/book-1",
+		},
+		{
+			name:   "book with title and author without narrator",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:       "sess-icy-no-narrator",
+				Title:    "Book Solo",
+				Author:   "Author Solo",
+				CoverURL: "http://proxy.example.org/api/proxy/covers/book-2",
+			},
+			wantName: "Book Solo",
+			wantDesc: "Author Solo",
+			wantLogo: "http://proxy.example.org/api/proxy/covers/book-2",
+		},
+		{
+			name:   "book with title and narrator without author",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:       "sess-icy-no-author",
+				Title:    "Book Solo 2",
+				Narrator: "Narrator Solo",
+				CoverURL: "http://proxy.example.org/api/proxy/covers/book-3",
+			},
+			wantName: "Book Solo 2",
+			wantDesc: "Narrator Solo",
+			wantLogo: "http://proxy.example.org/api/proxy/covers/book-3",
+		},
+		{
+			name:   "book with title only",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:    "sess-icy-title-only",
+				Title: "Only Title",
+			},
+			wantName: "Only Title",
+		},
+		{
+			name:   "book with author only",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:     "sess-icy-author-only",
+				Author: "Only Author",
+			},
+			wantName: "Only Author",
+		},
+		{
+			name: "book with empty metadata defaults to Audiobook",
+			sess: &session.Session{
+				ID: "sess-icy-empty",
+			},
+			method:   http.MethodHead,
+			wantName: "Audiobook",
+		},
+		{
+			name:      "podcast with episode title and podcast title",
+			method:    http.MethodHead,
+			isPodcast: true,
+			sess: &session.Session{
+				ID:           "sess-icy-podcast-full",
+				EpisodeTitle: "Episode 1",
+				Title:        "Podcast Show",
+				Author:       "Host Name",
+				CoverURL:     "http://proxy.example.org/api/proxy/covers/pod-1",
+			},
+			wantName: "Episode 1",
+			wantDesc: "Podcast Show",
+			wantLogo: "http://proxy.example.org/api/proxy/covers/pod-1",
+		},
+		{
+			name:      "podcast with episode title only falling back to author",
+			method:    http.MethodHead,
+			isPodcast: true,
+			sess: &session.Session{
+				ID:           "sess-icy-podcast-ep-only",
+				EpisodeTitle: "Episode Solo",
+				Author:       "Solo Host",
+			},
+			wantName: "Episode Solo",
+			wantDesc: "Solo Host",
+		},
+		{
+			name:      "podcast by episode id without titles",
+			method:    http.MethodHead,
+			isPodcast: true,
+			sess: &session.Session{
+				ID:        "sess-icy-pod-fallback",
+				EpisodeID: "ep-999",
+			},
+			wantName: "Podcast Episode",
+		},
+		{
+			name:   "crlf sanitization in title and author",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:       "sess-icy-crlf",
+				Title:    "Book\r\nTitle\tLine",
+				Author:   "Author\nName",
+				Narrator: "Narrator\rName",
+			},
+			wantName: "Book Title Line • Author Name",
+			wantDesc: "Narrator Name",
+		},
+		{
+			name:   "relative cover url resolved via external base",
+			method: http.MethodHead,
+			sess: &session.Session{
+				ID:     "sess-icy-cover-resolve",
+				ItemID: "item-cov-1",
+				Title:  "Cover Book",
+			},
+			wantName: "Cover Book",
+			wantLogo: "http://proxy.example.org:8099/api/proxy/covers/item-cov-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h, store := newTestEnv(t, nil)
+			if tt.isPodcast {
+				tt.sess.MediaType = "podcast"
+			} else {
+				tt.sess.MediaType = "book"
+			}
+
+			tok, err := store.Create(tt.sess)
+			if err != nil {
+				t.Fatalf("create sess: %v", err)
+			}
+
+			path := "/stream/" + tt.sess.ID + ".aac?token=" + tok
+			req := httptest.NewRequestWithContext(context.Background(), tt.method, path, http.NoBody)
+			req.Host = "example.org"
+			req.SetPathValue("session_id", tt.sess.ID+".aac")
+			rec := httptest.NewRecorder()
+
+			h.HandleStream(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+
+			wantGenre := "Audiobook"
+			if tt.isPodcast {
+				wantGenre = "Podcast"
+			}
+			if got := rec.Header().Get("icy-genre"); got != wantGenre {
+				t.Errorf("icy-genre = %q, want %q", got, wantGenre)
+			}
+			if got := rec.Header().Get("icy-name"); got != tt.wantName {
+				t.Errorf("icy-name = %q, want %q", got, tt.wantName)
+			}
+			if got := rec.Header().Get("icy-description"); got != tt.wantDesc {
+				t.Errorf("icy-description = %q, want %q", got, tt.wantDesc)
+			}
+			if tt.wantLogo != "" {
+				if got := rec.Header().Get("icy-logo"); got != tt.wantLogo {
+					t.Errorf("icy-logo = %q, want %q", got, tt.wantLogo)
+				}
+				if got := rec.Header().Get("icy-url"); got != tt.wantLogo {
+					t.Errorf("icy-url = %q, want %q", got, tt.wantLogo)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractTitle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		reqTitle string
+		resp     *absclient.PlayResponse
+		want     string
+	}{
+		{
+			name:     "fallback to MediaMetadata title",
+			reqTitle: "",
+			resp: &absclient.PlayResponse{MediaMetadata: &struct {
+				Title        string `json:"title"`
+				AuthorName   string `json:"authorName"`
+				Author       string `json:"author"`
+				NarratorName string `json:"narratorName"`
+			}{Title: "Meta Only"}},
+			want: "Meta Only",
+		},
+		{
+			name:     "empty when no metadata at all",
+			reqTitle: "",
+			resp:     &absclient.PlayResponse{},
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractTitle(tt.reqTitle, tt.resp); got != tt.want {
+				t.Errorf("extractTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractAuthor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		reqAuthor string
+		resp      *absclient.PlayResponse
+		want      string
+	}{
+		{
+			name:      "fallback to MediaMetadata Author field",
+			reqAuthor: "",
+			resp: &absclient.PlayResponse{MediaMetadata: &struct {
+				Title        string `json:"title"`
+				AuthorName   string `json:"authorName"`
+				Author       string `json:"author"`
+				NarratorName string `json:"narratorName"`
+			}{Author: "Fallback Author"}},
+			want: "Fallback Author",
+		},
+		{
+			name:      "fallback to MediaMetadata AuthorName field",
+			reqAuthor: "",
+			resp: &absclient.PlayResponse{MediaMetadata: &struct {
+				Title        string `json:"title"`
+				AuthorName   string `json:"authorName"`
+				Author       string `json:"author"`
+				NarratorName string `json:"narratorName"`
+			}{AuthorName: "Meta AuthorName"}},
+			want: "Meta AuthorName",
+		},
+		{
+			name:      "empty when no metadata at all",
+			reqAuthor: "",
+			resp:      &absclient.PlayResponse{},
+			want:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractAuthor(tt.reqAuthor, tt.resp); got != tt.want {
+				t.Errorf("extractAuthor() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

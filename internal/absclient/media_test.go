@@ -20,6 +20,7 @@ func TestGetPodcastEpisodes(t *testing.T) {
 		wantProgress  float64
 		wantErr       bool
 		wantISOFormat bool
+		wantFinished  bool
 	}{
 		{
 			name:      "empty podcast id",
@@ -58,7 +59,7 @@ func TestGetPodcastEpisodes(t *testing.T) {
 						]
 					},
 					"userMediaProgress": [
-						{"episodeId": "ep-1", "currentTime": 350.5}
+						{"episodeId": "ep-1", "currentTime": 350.5, "isFinished": true}
 					]
 				}`
 				return &http.Response{
@@ -71,6 +72,7 @@ func TestGetPodcastEpisodes(t *testing.T) {
 			wantEpisodes:  2,
 			wantProgress:  350.5,
 			wantISOFormat: true,
+			wantFinished:  true,
 		},
 		{
 			name:      "success with single object progress",
@@ -130,6 +132,34 @@ func TestGetPodcastEpisodes(t *testing.T) {
 			wantISOFormat: false,
 		},
 		{
+			name:      "finished episode falls back to duration",
+			podcastID: "pod-finished-zero",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				respJSON := `{
+					"media": {
+						"episodes": [
+							{
+								"id": "ep-finished-zero",
+								"title": "Finished Episode",
+								"audioFile": {"duration": 2100.0}
+							}
+						]
+					},
+					"userMediaProgress": [
+						{"episodeId": "ep-finished-zero", "currentTime": 0, "isFinished": true}
+					]
+				}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(respJSON)),
+				}, nil
+			},
+			wantErr:      false,
+			wantEpisodes: 1,
+			wantProgress: 2100,
+			wantFinished: true,
+		},
+		{
 			name:      "status non-200",
 			podcastID: "pod-err",
 			mockFn: func(_ *http.Request) (*http.Response, error) {
@@ -180,6 +210,9 @@ func TestGetPodcastEpisodes(t *testing.T) {
 			}
 			if episodes[0].Progress != tt.wantProgress {
 				t.Errorf("episodes[0].Progress = %v, want %v", episodes[0].Progress, tt.wantProgress)
+			}
+			if episodes[0].IsFinished != tt.wantFinished {
+				t.Errorf("episodes[0].IsFinished = %v, want %v", episodes[0].IsFinished, tt.wantFinished)
 			}
 			if tt.wantISOFormat && episodes[0].PublishedAt == "" {
 				t.Errorf("expected non-empty ISO publishedAt")
@@ -271,10 +304,13 @@ func TestGetMediaItems(t *testing.T) {
 		name          string
 		librariesResp string
 		itemsResp     string
+		progressResp  string
 		wantItems     int
 		librariesCode int
 		itemsCode     int
+		wantProgress  float64
 		wantErr       bool
+		wantFinished  bool
 	}{
 		{
 			name:          "success books filter",
@@ -283,6 +319,28 @@ func TestGetMediaItems(t *testing.T) {
 			itemsCode:     http.StatusOK,
 			itemsResp:     `{"results":[{"id":"b-1","media":{"metadata":{"title":"Book One","authorName":"Author A"},"duration":1200},"userMediaProgress":{"currentTime":100}}]}`,
 			wantItems:     1,
+		},
+		{
+			name:          "success with progress lookups and finished status",
+			librariesCode: http.StatusOK,
+			librariesResp: `{"libraries":[{"id":"lib-prog","name":"Books","mediaType":"book"}]}`,
+			itemsCode:     http.StatusOK,
+			itemsResp:     `{"results":[{"id":"b-prog","media":{"metadata":{"title":"Finished Book","authorName":"Author B"},"duration":3600}}]}`,
+			progressResp:  `{"mediaProgress":[{"libraryItemId":"b-prog","currentTime":3600,"duration":3600,"isFinished":true}]}`,
+			wantItems:     1,
+			wantProgress:  3600,
+			wantFinished:  true,
+		},
+		{
+			name:          "finished item falls back to duration",
+			librariesCode: http.StatusOK,
+			librariesResp: `{"libraries":[{"id":"lib-finished-zero","name":"Books","mediaType":"book"}]}`,
+			itemsCode:     http.StatusOK,
+			itemsResp:     `{"results":[{"id":"b-finished-zero","media":{"metadata":{"title":"Finished Book","authorName":"Author C"},"duration":2400}}]}`,
+			progressResp:  `{"mediaProgress":[{"libraryItemId":"b-finished-zero","currentTime":0,"isFinished":true}]}`,
+			wantItems:     1,
+			wantProgress:  2400,
+			wantFinished:  true,
 		},
 		{
 			name:          "get libraries fails",
@@ -323,23 +381,7 @@ func TestGetMediaItems(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			mockFn := func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path == "/api/libraries" {
-					if tt.librariesCode != http.StatusOK {
-						return &http.Response{StatusCode: tt.librariesCode, Body: io.NopCloser(strings.NewReader("err"))}, nil
-					}
-					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tt.librariesResp))}, nil
-				}
-				if tt.transportErr != nil {
-					return nil, tt.transportErr
-				}
-				code := tt.itemsCode
-				if code == 0 {
-					code = http.StatusOK
-				}
-				return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(tt.itemsResp))}, nil
-			}
-
+			mockFn := createMediaItemsMock(tt.librariesCode, tt.librariesResp, tt.progressResp, tt.itemsResp, tt.itemsCode, tt.transportErr)
 			c := New("http://abs.example.org", "tok", "1.0.0", newMockHTTPClient(mockFn))
 			items, err := c.GetMediaItems(context.Background(), "book")
 			if (err != nil) != tt.wantErr {
@@ -348,7 +390,37 @@ func TestGetMediaItems(t *testing.T) {
 			if !tt.wantErr && len(items) != tt.wantItems {
 				t.Errorf("got %d items, want %d", len(items), tt.wantItems)
 			}
+			if !tt.wantErr && tt.wantProgress > 0 && len(items) > 0 {
+				if items[0].Progress != tt.wantProgress {
+					t.Errorf("got progress %v, want %v", items[0].Progress, tt.wantProgress)
+				}
+				if items[0].IsFinished != tt.wantFinished {
+					t.Errorf("got isFinished %v, want %v", items[0].IsFinished, tt.wantFinished)
+				}
+			}
 		})
+	}
+}
+
+func createMediaItemsMock(librariesCode int, librariesResp, progressResp, itemsResp string, itemsCode int, transportErr error) roundTripFunc {
+	return func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/api/libraries" {
+			if librariesCode != http.StatusOK {
+				return &http.Response{StatusCode: librariesCode, Body: io.NopCloser(strings.NewReader("err"))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(librariesResp))}, nil
+		}
+		if r.URL.Path == "/api/me/progress" && progressResp != "" {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(progressResp))}, nil
+		}
+		if transportErr != nil {
+			return nil, transportErr
+		}
+		code := itemsCode
+		if code == 0 {
+			code = http.StatusOK
+		}
+		return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(itemsResp))}, nil
 	}
 }
 

@@ -228,14 +228,15 @@ type Library struct {
 
 // MediaItem represents an individual book or podcast containing playback duration, progress offset, and proxy cover URIs.
 type MediaItem struct {
-	ID        string  `json:"id"`
-	Title     string  `json:"title"`
-	Author    string  `json:"author,omitempty"`
-	Narrator  string  `json:"narrator,omitempty"`
-	MediaType string  `json:"mediaType"`
-	CoverURL  string  `json:"coverUrl"`
-	Duration  float64 `json:"duration"`
-	Progress  float64 `json:"progress"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Author     string  `json:"author,omitempty"`
+	Narrator   string  `json:"narrator,omitempty"`
+	MediaType  string  `json:"mediaType"`
+	CoverURL   string  `json:"coverUrl"`
+	Duration   float64 `json:"duration"`
+	Progress   float64 `json:"progress"`
+	IsFinished bool    `json:"isFinished"`
 }
 
 // PodcastEpisode contains episode metadata and user-specific listening progress returned by Audiobookshelf.
@@ -247,6 +248,7 @@ type PodcastEpisode struct {
 	PublishedAt string  `json:"publishedAt,omitempty"`
 	Duration    float64 `json:"duration"`
 	Progress    float64 `json:"progress"`
+	IsFinished  bool    `json:"isFinished"`
 }
 
 // InProgressItem represents an audiobook or podcast episode currently in progress for the authenticated user.
@@ -350,6 +352,7 @@ type rawEpisode struct {
 type rawEpisodeProgress struct {
 	EpisodeID   string  `json:"episodeId"`
 	CurrentTime float64 `json:"currentTime"`
+	IsFinished  bool    `json:"isFinished"`
 }
 
 type librariesResponse struct {
@@ -403,6 +406,8 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 		return nil, err
 	}
 
+	byItem, _ := c.fetchProgressLookups(ctx)
+
 	var items []MediaItem
 	for _, lib := range libs {
 		if mediaType != "" && lib.MediaType != mediaType {
@@ -430,18 +435,26 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 
 		for _, it := range resp.Results {
 			progress := 0.0
-			if it.UserMediaProgress != nil {
+			isFinished := false
+			if prog, ok := byItem[it.ID]; ok {
+				progress = prog.CurrentTime
+				isFinished = prog.IsFinished
+				if isFinished && progress <= 0 && it.Media.Duration > 0 {
+					progress = it.Media.Duration
+				}
+			} else if it.UserMediaProgress != nil {
 				progress = it.UserMediaProgress.CurrentTime
 			}
 			items = append(items, MediaItem{
-				ID:        it.ID,
-				Title:     it.Media.Metadata.Title,
-				Author:    it.Media.Metadata.AuthorName,
-				Narrator:  it.Media.Metadata.NarratorName,
-				MediaType: lib.MediaType,
-				Duration:  it.Media.Duration,
-				Progress:  progress,
-				CoverURL:  "/api/proxy/covers/" + it.ID,
+				ID:         it.ID,
+				Title:      it.Media.Metadata.Title,
+				Author:     it.Media.Metadata.AuthorName,
+				Narrator:   it.Media.Metadata.NarratorName,
+				MediaType:  lib.MediaType,
+				Duration:   it.Media.Duration,
+				Progress:   progress,
+				CoverURL:   "/api/proxy/covers/" + it.ID,
+				IsFinished: isFinished,
 			})
 		}
 	}
@@ -522,6 +535,16 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 			duration = ep.Duration
 		}
 
+		progress := 0.0
+		isFinished := false
+		if epProg, ok := progressMap[ep.ID]; ok {
+			progress = epProg.CurrentTime
+			isFinished = epProg.IsFinished
+			if isFinished && progress <= 0 && duration > 0 {
+				progress = duration
+			}
+		}
+
 		episodes = append(episodes, PodcastEpisode{
 			ID:          ep.ID,
 			Title:       ep.Title,
@@ -529,15 +552,16 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 			Episode:     ep.Episode,
 			PublishedAt: publishedAtStr,
 			Duration:    duration,
-			Progress:    progressMap[ep.ID],
+			Progress:    progress,
+			IsFinished:  isFinished,
 		})
 	}
 
 	return episodes, nil
 }
 
-func parseEpisodeProgressMap(raw json.RawMessage) map[string]float64 {
-	progressMap := make(map[string]float64)
+func parseEpisodeProgressMap(raw json.RawMessage) map[string]rawEpisodeProgress {
+	progressMap := make(map[string]rawEpisodeProgress)
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return progressMap
@@ -546,7 +570,7 @@ func parseEpisodeProgressMap(raw json.RawMessage) map[string]float64 {
 	if trimmed[0] == '{' {
 		var single rawEpisodeProgress
 		if err := json.Unmarshal(trimmed, &single); err == nil && single.EpisodeID != "" {
-			progressMap[single.EpisodeID] = single.CurrentTime
+			progressMap[single.EpisodeID] = single
 		}
 		return progressMap
 	}
@@ -556,7 +580,7 @@ func parseEpisodeProgressMap(raw json.RawMessage) map[string]float64 {
 		if err := json.Unmarshal(trimmed, &list); err == nil {
 			for _, p := range list {
 				if p.EpisodeID != "" {
-					progressMap[p.EpisodeID] = p.CurrentTime
+					progressMap[p.EpisodeID] = p
 				}
 			}
 		}

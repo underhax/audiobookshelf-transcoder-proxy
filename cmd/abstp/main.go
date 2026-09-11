@@ -20,6 +20,7 @@ import (
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/config"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/handler"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/session"
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 )
 
 // Version indicates the current binary release version injected via linker flags during compilation.
@@ -29,6 +30,21 @@ func defaultNotifySignals(c chan<- os.Signal, sig ...os.Signal) {
 	signal.Notify(c, sig...)
 }
 
+func defaultStartTrackProxy(tp *trackproxy.Server) (int, error) {
+	port, err := tp.Start()
+	if err != nil {
+		return 0, fmt.Errorf("track proxy start: %w", err)
+	}
+	return port, nil
+}
+
+func defaultShutdownTrackProxy(ctx context.Context, tp *trackproxy.Server) error {
+	if err := tp.Shutdown(ctx); err != nil {
+		return fmt.Errorf("track proxy shutdown: %w", err)
+	}
+	return nil
+}
+
 var (
 	stdout             io.Writer = os.Stdout
 	executeHealthcheck           = defaultHealthcheck
@@ -36,6 +52,8 @@ var (
 	runFunc                      = run
 	logFatalf                    = log.Fatalf
 	notifySignals                = defaultNotifySignals
+	startTrackProxy              = defaultStartTrackProxy
+	shutdownTrackProxy           = defaultShutdownTrackProxy
 )
 
 func defaultHealthcheck(ctx context.Context, listenAddr string, client *http.Client) error {
@@ -156,8 +174,22 @@ func run(args []string, getenv func(string) string, sigs ...os.Signal) error {
 	detectCancel()
 	log.Printf("Target Audiobookshelf URL: %s", cfg.ABSURL)
 
+	trackProxy := trackproxy.New(cfg.ABSURL, cfg.ABSToken, Version, cfg.Debug)
+	proxyPort, err := startTrackProxy(trackProxy)
+	if err != nil {
+		return fmt.Errorf("start track proxy: %w", err)
+	}
+	log.Printf("Internal track proxy listening on 127.0.0.1:%d", proxyPort)
+	defer func() {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		if shutErr := shutdownTrackProxy(shutCtx, trackProxy); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
+			log.Printf("shutdown track proxy error: %v", shutErr)
+		}
+	}()
+
 	store := session.NewStore(cfg.TokenTTL)
-	h := handler.NewHandler(&cfg, store, absCli)
+	h := handler.NewHandler(&cfg, store, absCli, trackProxy)
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,

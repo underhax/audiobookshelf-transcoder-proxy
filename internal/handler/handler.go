@@ -13,6 +13,7 @@ import (
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/absclient"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/config"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/session"
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/validator"
 )
 
@@ -26,14 +27,16 @@ type Handler struct {
 	absClient         *absclient.Client
 	store             *session.Store
 	cfg               *config.Config
+	trackProxy        *trackproxy.Server
 	connsSem          chan struct{}
 	streamsSem        chan struct{}
 	syncInterval      time.Duration
 	keepaliveInterval time.Duration
+	progressInterval  time.Duration
 }
 
 // NewHandler initializes a new Handler.
-func NewHandler(cfg *config.Config, store *session.Store, absClient *absclient.Client) *Handler {
+func NewHandler(cfg *config.Config, store *session.Store, absClient *absclient.Client, trackProxy *trackproxy.Server) *Handler {
 	maxConns := 100
 	maxStreams := 5
 	if cfg != nil {
@@ -49,10 +52,12 @@ func NewHandler(cfg *config.Config, store *session.Store, absClient *absclient.C
 		cfg:               cfg,
 		store:             store,
 		absClient:         absClient,
+		trackProxy:        trackProxy,
 		connsSem:          make(chan struct{}, maxConns),
 		streamsSem:        make(chan struct{}, maxStreams),
 		syncInterval:      syncInterval,
 		keepaliveInterval: 1 * time.Second,
+		progressInterval:  60 * time.Second,
 	}
 }
 

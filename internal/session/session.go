@@ -81,11 +81,35 @@ func defaultRandRead(b []byte) (int, error) {
 	return n, nil
 }
 
-var randRead = defaultRandRead
+var (
+	randReadMu sync.RWMutex
+	randRead   = defaultRandRead
+)
 
-func generateToken() (string, error) {
+func callRandRead(b []byte) (int, error) {
+	randReadMu.RLock()
+	fn := randRead
+	randReadMu.RUnlock()
+	return fn(b)
+}
+
+// SetRandRead overrides the entropy source for testing.
+func SetRandRead(fn func([]byte) (int, error)) func() {
+	randReadMu.Lock()
+	orig := randRead
+	randRead = fn
+	randReadMu.Unlock()
+	return func() {
+		randReadMu.Lock()
+		randRead = orig
+		randReadMu.Unlock()
+	}
+}
+
+// GenerateToken creates a cryptographically secure 256-bit random hexadecimal token to authenticate stream sessions.
+func GenerateToken() (string, error) {
 	b := make([]byte, 32)
-	if _, err := randRead(b); err != nil {
+	if _, err := callRandRead(b); err != nil {
 		return "", fmt.Errorf("read random bytes: %w", err)
 	}
 	return hex.EncodeToString(b), nil
@@ -97,7 +121,7 @@ func (s *Store) Create(sess *Session) (string, error) {
 		return "", errors.New("cannot create nil or empty session")
 	}
 
-	token, err := generateToken()
+	token, err := GenerateToken()
 	if err != nil {
 		return "", err
 	}

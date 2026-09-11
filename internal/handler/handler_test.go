@@ -17,6 +17,7 @@ import (
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/absclient"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/config"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/session"
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 )
 
 type roundTripFunc func(req *http.Request) (*http.Response, error)
@@ -55,7 +56,8 @@ func newTestEnv(t *testing.T, roundTrip roundTripFunc) (*Handler, *session.Store
 
 	store := session.NewStore(30 * time.Second)
 	absCli := absclient.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", newTestClient(roundTrip))
-	h := NewHandler(cfg, store, absCli)
+	tp := trackproxy.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", cfg.Debug)
+	h := NewHandler(cfg, store, absCli, tp)
 
 	return h, store
 }
@@ -67,7 +69,7 @@ func TestSecurityMiddleware_MaxConns(t *testing.T) {
 		MaxConns:   1,
 		MaxStreams: 1,
 	}
-	h := NewHandler(cfg, nil, nil)
+	h := NewHandler(cfg, nil, nil, nil)
 	routes := h.Routes()
 
 	h.connsSem <- struct{}{}
@@ -405,7 +407,7 @@ func TestSessionStart_DynamicExternalURL(t *testing.T) {
 				}, nil
 			}
 			absCli := absclient.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", newTestClient(roundTrip))
-			h := NewHandler(cfg, store, absCli)
+			h := NewHandler(cfg, store, absCli, nil)
 			routes := h.Routes()
 
 			body := bytes.NewBufferString(`{"itemId":"book-dyn"}`)

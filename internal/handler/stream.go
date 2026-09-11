@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/ffmpeg"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/ratelimit"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/session"
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 )
 
 // StartSessionRequest encapsulates client playback parameters including item identifiers, requested speed, and start position.
@@ -171,20 +173,17 @@ func defaultGenerateConcat(baseURL string, trackURLs []string) (string, error) {
 
 var generateConcat = defaultGenerateConcat
 
-func prepareInput(baseURL string, tracks []absclient.AudioTrack, startIdx int) (inputPath string, isConcat bool, cleanup func(), err error) {
+func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclient.AudioTrack, startIdx int) (inputPath string, isConcat bool, cleanup func(), err error) {
 	if len(tracks) == 0 {
 		return "", false, func() {}, errors.New("no audio tracks available")
 	}
-	if len(tracks) == 1 {
-		return ffmpeg.BuildMediaURL(baseURL, tracks[0].ContentURL), false, func() {}, nil
-	}
 
-	var trackURLs []string
+	trackURLs := make([]string, 0, len(tracks)-startIdx)
 	for i := startIdx; i < len(tracks); i++ {
-		trackURLs = append(trackURLs, tracks[i].ContentURL)
+		trackURLs = append(trackURLs, fmt.Sprintf("http://127.0.0.1:%d/track/%s/%d?token=%s", proxyPort, sessionID, i, proxyToken))
 	}
 
-	concatPath, err := generateConcat(baseURL, trackURLs)
+	concatPath, err := generateConcat("", trackURLs)
 	if err != nil {
 		return "", false, nil, fmt.Errorf("generate concat file: %w", err)
 	}
@@ -197,6 +196,58 @@ func prepareInput(baseURL string, tracks []absclient.AudioTrack, startIdx int) (
 	}
 
 	return concatPath, true, cleanup, nil
+}
+
+func defaultTrackProxyRegisterSession(tp *trackproxy.Server, sessionID string, trackURLs []string) (string, error) {
+	token, err := tp.RegisterSession(sessionID, trackURLs)
+	if err != nil {
+		return "", fmt.Errorf("track proxy register: %w", err)
+	}
+	return token, nil
+}
+
+var (
+	trackProxyRegisterSessionMu sync.RWMutex
+	trackProxyRegisterSession   = defaultTrackProxyRegisterSession
+)
+
+func callTrackProxyRegisterSession(tp *trackproxy.Server, sessionID string, trackURLs []string) (string, error) {
+	trackProxyRegisterSessionMu.RLock()
+	fn := trackProxyRegisterSession
+	trackProxyRegisterSessionMu.RUnlock()
+	return fn(tp, sessionID, trackURLs)
+}
+
+func (h *Handler) registerTrackProxySession(sessionID string, tracks []absclient.AudioTrack) (port int, proxyToken string, cleanup func(), err error) {
+	if h.trackProxy == nil {
+		return 0, "", func() {}, nil
+	}
+	trackURLs := make([]string, len(tracks))
+	for i, t := range tracks {
+		trackURLs[i] = t.ContentURL
+	}
+	token, err := callTrackProxyRegisterSession(h.trackProxy, sessionID, trackURLs)
+	if err != nil {
+		return 0, "", func() {}, fmt.Errorf("register track proxy session: %w", err)
+	}
+	return h.trackProxy.Port(), token, func() {
+		h.trackProxy.UnregisterSession(sessionID)
+	}, nil
+}
+
+func (h *Handler) buildFFmpegParams(inputPath string, isConcat bool, sess *session.Session) ffmpeg.Params {
+	version := ""
+	if h.absClient != nil {
+		version = h.absClient.Version()
+	}
+	return ffmpeg.Params{
+		FFmpegPath: h.cfg.FFmpegPath,
+		InputPath:  inputPath,
+		Version:    version,
+		Speed:      sess.Speed,
+		SeekOffset: sess.SeekOffset,
+		IsConcat:   isConcat,
+	}
 }
 
 // HandleStream handles the client audio stream GET and HEAD requests.
@@ -240,7 +291,15 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] stream token validated for session %s (reusable=%v), preparing input", sessionID, h.cfg.DevReusableToken), "\n", " "))
 	}
 
-	inputPath, isConcat, cleanup, err := prepareInput(h.cfg.ABSURL, sess.AudioTracks, sess.StartingTrackIndex)
+	proxyPort, proxyToken, unregister, err := h.registerTrackProxySession(sessionID, sess.AudioTracks)
+	if err != nil {
+		log.Printf("register track proxy session failed: %v", err)
+		http.Error(w, `{"error":"failed to initialize media proxy"}`, http.StatusInternalServerError)
+		return
+	}
+	defer unregister()
+
+	inputPath, isConcat, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex)
 	if err != nil {
 		log.Printf("prepare input failed: %v", err)
 		http.Error(w, `{"error":"failed to prepare media input"}`, http.StatusInternalServerError)
@@ -252,23 +311,16 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	defer cancelStream()
 	sess.Cancel = cancelStream
 
-	params := ffmpeg.Params{
-		FFmpegPath: h.cfg.FFmpegPath,
-		Token:      h.cfg.ABSToken,
-		InputPath:  inputPath,
-		Speed:      sess.Speed,
-		SeekOffset: sess.SeekOffset,
-		IsConcat:   isConcat,
-	}
+	params := h.buildFFmpegParams(inputPath, isConcat, sess)
 
-	cmd, stdout, err := ffmpeg.StartProcess(streamCtx, params)
+	cmd, stdout, stderrBuf, err := ffmpeg.StartProcess(streamCtx, &params)
 	if err != nil {
 		log.Printf("start ffmpeg error: %v", err)
 		http.Error(w, `{"error":"failed to start transcoder"}`, http.StatusInternalServerError)
 		return
 	}
 	sess.Cmd = cmd
-	defer terminateProcess(stdout, cmd)
+	defer terminateProcess(sessionID, stdout, cmd)
 
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
@@ -284,9 +336,15 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		log.Println(strings.ReplaceAll("[DEBUG] streaming started for session "+sessionID, "\n", " "))
 	}
 
+	streamStart := time.Now()
+
 	burstBytes := int64(h.cfg.BufferDuration.Seconds() * float64(ratelimit.DefaultBytesPerSecond))
 	rw := ratelimit.NewWriter(streamCtx, w, burstBytes, ratelimit.DefaultBytesPerSecond)
-	h.pipeStreamToClient(streamCtx, stdout, rw, sess)
+
+	stopProgress := h.startProgressLogger(streamCtx, sess, sessionID, streamStart)
+	defer stopProgress()
+
+	termReason := h.pipeStreamToClient(streamCtx, stdout, rw, sess)
 
 	if sess.BytesSent.Load() == 0 {
 		if h.cfg.Debug {
@@ -297,9 +355,8 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 
 	h.handleDisconnectSync(r.Context(), sess)
 
-	if h.cfg.Debug {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] client disconnected for session %s, total bytes sent: %d", sessionID, sess.BytesSent.Load()), "\n", " "))
-	}
+	elapsed := time.Since(streamStart)
+	h.logStreamEnd(sessionID, sess, elapsed, termReason, stderrBuf)
 
 	if !h.cfg.DevReusableToken {
 		h.store.Delete(sess.ID)
@@ -362,27 +419,41 @@ func callProcessKill(p *os.Process) error {
 	return fn(p)
 }
 
-func terminateProcess(stdout io.Closer, cmd *exec.Cmd) {
+func terminateProcess(sessionID string, stdout io.Closer, cmd *exec.Cmd) {
 	if closeErr := stdout.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
-		log.Printf("close stdout error: %v", closeErr)
+		log.Println(strings.ReplaceAll(fmt.Sprintf("close stdout error for session %s: %v", sessionID, closeErr), "\n", " "))
+	}
+	if cmd == nil {
+		return
 	}
 	if cmd.Process != nil {
 		if killErr := callProcessKill(cmd.Process); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-			log.Printf("kill process error: %v", killErr)
+			log.Println(strings.ReplaceAll(fmt.Sprintf("kill process error for session %s: %v", sessionID, killErr), "\n", " "))
 		}
 	}
-	if waitErr := cmd.Wait(); waitErr != nil && !errors.Is(waitErr, os.ErrProcessDone) {
-		_ = waitErr.Error()
-	}
+	logProcessExit(sessionID, cmd)
 }
 
-func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader, rw *ratelimit.Writer, sess *session.Session) {
-	buf := make([]byte, 32768)
+func logProcessExit(sessionID string, cmd *exec.Cmd) {
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		if cmd.ProcessState != nil {
+			log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited cleanly with code %d", sessionID, cmd.ProcessState.ExitCode()), "\n", " "))
+		}
+		return
+	}
+	if errors.Is(waitErr, os.ErrProcessDone) || strings.Contains(waitErr.Error(), "already waited") || strings.Contains(waitErr.Error(), "not started") {
+		return
+	}
+	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
+		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited with code %d: %v", sessionID, exitErr.ExitCode(), exitErr), "\n", " "))
+		return
+	}
+	log.Println(strings.ReplaceAll(fmt.Sprintf("wait ffmpeg process error for session %s: %v", sessionID, waitErr), "\n", " "))
+}
 
-	var writeMu sync.Mutex
-	keepaliveCtx, keepaliveCancel := context.WithCancel(streamCtx)
-	defer keepaliveCancel()
-
+func (h *Handler) startKeepalive(ctx context.Context, rw *ratelimit.Writer, sess *session.Session, writeMu *sync.Mutex) context.CancelFunc {
+	keepaliveCtx, keepaliveCancel := context.WithCancel(ctx)
 	interval := h.keepaliveInterval
 	if interval <= 0 {
 		interval = 1 * time.Second
@@ -400,7 +471,7 @@ func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader
 				if sess.BytesSent.Load() == 0 {
 					_, writeErr := rw.Write([]byte{0})
 					if writeErr != nil && h.cfg.Debug {
-						log.Printf("keepalive write error: %v", writeErr)
+						log.Println(strings.ReplaceAll(fmt.Sprintf("keepalive write error: %v", writeErr), "\n", " "))
 					}
 				}
 				writeMu.Unlock()
@@ -408,10 +479,19 @@ func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader
 		}
 	}()
 
+	return keepaliveCancel
+}
+
+func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader, rw *ratelimit.Writer, sess *session.Session) string {
+	buf := make([]byte, 32768)
+	var writeMu sync.Mutex
+	keepaliveCancel := h.startKeepalive(streamCtx, rw, sess, &writeMu)
+	defer keepaliveCancel()
+
 	for streamCtx.Err() == nil {
 		nr, readErr := stdout.Read(buf)
 		if streamCtx.Err() != nil {
-			break
+			return "context_canceled"
 		}
 		if nr > 0 {
 			writeMu.Lock()
@@ -426,12 +506,57 @@ func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader
 			writeMu.Unlock()
 
 			if writeErr != nil {
-				break
+				return "client_write_error"
 			}
 		}
 		if readErr != nil {
-			break
+			if errors.Is(readErr, io.EOF) {
+				return "eof"
+			}
+			return "ffmpeg_read_error"
 		}
+	}
+	return "context_canceled"
+}
+
+func (h *Handler) startProgressLogger(ctx context.Context, sess *session.Session, sessionID string, start time.Time) func() {
+	if !h.cfg.Debug {
+		return func() {}
+	}
+	progressStop := make(chan struct{})
+	go h.logStreamProgress(ctx, sess, sessionID, start, progressStop)
+	return func() { close(progressStop) }
+}
+
+func (h *Handler) logStreamProgress(ctx context.Context, sess *session.Session, sessionID string, start time.Time, stop <-chan struct{}) {
+	interval := h.progressInterval
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-ticker.C:
+			pos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration)
+			log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] progress session=%s elapsed=%s bytes=%d position=%.1f",
+				sessionID, time.Since(start).Truncate(time.Second), sess.BytesSent.Load(), pos), "\n", " "))
+		}
+	}
+}
+
+func (h *Handler) logStreamEnd(sessionID string, sess *session.Session, elapsed time.Duration, reason string, stderrBuf *bytes.Buffer) {
+	log.Println(strings.ReplaceAll(fmt.Sprintf("stream ended session=%s elapsed=%s bytes=%d reason=%s",
+		sessionID, elapsed.Truncate(time.Second), sess.BytesSent.Load(), reason), "\n", " "))
+
+	if stderrBuf != nil && stderrBuf.Len() > 0 {
+		cleaned := strings.ReplaceAll(strings.TrimSpace(stderrBuf.String()), "\n", " | ")
+		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg stderr session=%s: %s", sessionID, cleaned), "\n", " "))
 	}
 }
 

@@ -2,6 +2,7 @@
 package ffmpeg
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,19 +18,29 @@ import (
 // Params holds the parameters required to spawn an FFmpeg transcoding pipeline.
 type Params struct {
 	FFmpegPath string
-	Token      string
 	InputPath  string
+	Version    string
 	Speed      float64
 	SeekOffset float64
 	IsConcat   bool
 }
 
 // BuildArgs constructs the slice of command-line arguments passed to FFmpeg.
-func BuildArgs(params Params) []string {
+func BuildArgs(params *Params) []string {
+	if params == nil {
+		return nil
+	}
+
+	userAgent := "abstp"
+	if params.Version != "" {
+		userAgent = "abstp/" + params.Version
+	}
+
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
-		"-headers", "Authorization: Bearer " + params.Token + "\r\n",
+		"-user_agent", userAgent,
+		"-rw_timeout", "60000000",
 		"-probesize", "32768",
 		"-analyzeduration", "100000",
 	}
@@ -69,8 +80,15 @@ func defaultCommandContext(ctx context.Context) *exec.Cmd {
 
 var commandContext = defaultCommandContext
 
-// StartProcess spawns the FFmpeg process with stdout piped for audio streaming.
-func StartProcess(ctx context.Context, params Params) (cmd *exec.Cmd, stdout io.ReadCloser, err error) {
+// MaxStderrBytes limits the captured ffmpeg stderr to prevent unbounded memory growth.
+const MaxStderrBytes = 4096
+
+// StartProcess spawns the FFmpeg process with stdout piped for audio streaming and stderr captured for diagnostics.
+func StartProcess(ctx context.Context, params *Params) (cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buffer, err error) {
+	if params == nil {
+		return nil, nil, nil, errors.New("params cannot be nil")
+	}
+
 	args := BuildArgs(params)
 
 	binName := "ffmpeg"
@@ -80,7 +98,7 @@ func StartProcess(ctx context.Context, params Params) (cmd *exec.Cmd, stdout io.
 
 	binPath, lookErr := exec.LookPath(binName)
 	if lookErr != nil {
-		return nil, nil, fmt.Errorf("lookup binary %s: %w", binName, lookErr)
+		return nil, nil, nil, fmt.Errorf("lookup binary %s: %w", binName, lookErr)
 	}
 
 	cmd = commandContext(ctx)
@@ -88,20 +106,40 @@ func StartProcess(ctx context.Context, params Params) (cmd *exec.Cmd, stdout io.
 	cmd.Args = append([]string{binName}, args...)
 	cmd.Err = nil
 
+	stderrBuf := bytes.NewBuffer(make([]byte, 0, MaxStderrBytes))
+	cmd.Stderr = &limitedWriter{buf: stderrBuf, limit: MaxStderrBytes}
+
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, nil, fmt.Errorf("create stdout pipe: %w", err)
+		return nil, nil, nil, fmt.Errorf("create stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		closeErr := stdoutPipe.Close()
-		return nil, nil, errors.Join(
+		return nil, nil, nil, errors.Join(
 			fmt.Errorf("start ffmpeg process: %w", err),
 			closeErr,
 		)
 	}
 
-	return cmd, stdoutPipe, nil
+	return cmd, stdoutPipe, stderrBuf, nil
+}
+
+type limitedWriter struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (lw *limitedWriter) Write(p []byte) (int, error) {
+	remaining := lw.limit - lw.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, _ = lw.buf.Write(p)
+	return len(p), nil
 }
 
 func defaultCreateTemp(dir, pattern string) (*os.File, error) {

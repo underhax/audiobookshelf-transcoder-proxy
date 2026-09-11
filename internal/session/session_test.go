@@ -49,11 +49,10 @@ func TestStore_Create_Errors(t *testing.T) {
 		t.Error("expected error creating session with empty ID")
 	}
 
-	orig := randRead
-	randRead = func(_ []byte) (int, error) {
+	cleanup := SetRandRead(func(_ []byte) (int, error) {
 		return 0, errors.New("entropy error")
-	}
-	defer func() { randRead = orig }()
+	})
+	defer cleanup()
 
 	if _, err := s.Create(&Session{ID: "sess_err"}); err == nil {
 		t.Error("expected error when randRead fails")
@@ -262,5 +261,33 @@ func TestSession_LastSyncPosition(t *testing.T) {
 	sess.SetLastSyncPosition(123.45)
 	if sess.GetLastSyncPosition() != 123.45 {
 		t.Errorf("expected 123.45, got %v", sess.GetLastSyncPosition())
+	}
+}
+
+func TestGenerateToken(t *testing.T) {
+	tok1, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tok1) != 64 {
+		t.Errorf("expected 64 hex chars, got %d", len(tok1))
+	}
+
+	tok2, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tok1 == tok2 {
+		t.Error("expected unique tokens")
+	}
+
+	orig := randRead
+	randRead = func(_ []byte) (int, error) {
+		return 0, errors.New("entropy error")
+	}
+	defer func() { randRead = orig }()
+
+	if _, err := GenerateToken(); err == nil {
+		t.Error("expected error when randRead fails")
 	}
 }

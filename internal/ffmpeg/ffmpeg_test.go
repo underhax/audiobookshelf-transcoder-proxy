@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -25,34 +26,33 @@ func TestBuildArgs(t *testing.T) {
 			name: "single track without seek or speed alteration",
 			params: Params{
 				FFmpegPath: "/opt/bin/ffmpeg-custom",
-				Token:      "tok123",
 				InputPath:  "http://abs.example.org/audio.mp3",
+				Version:    "1.2.3",
 				Speed:      1.0,
 				SeekOffset: 0.0,
 				IsConcat:   false,
 			},
-			wantSubstr: []string{"-headers", "Authorization: Bearer tok123\r\n", "-probesize", "32768", "-analyzeduration", "100000", "-i", "http://abs.example.org/audio.mp3", "-f", "adts"},
-			notSubstr:  []string{"-f concat", "-ss", "atempo"},
+			wantSubstr: []string{"-user_agent", "abstp/1.2.3", "-rw_timeout", "60000000", "-probesize", "32768", "-analyzeduration", "100000", "-i", "http://abs.example.org/audio.mp3", "-f", "adts"},
+			notSubstr:  []string{"-f concat", "-ss", "atempo", "-headers"},
 		},
 		{
-			name: "concat multi track with seek and custom speed",
+			name: "concat multi track with seek and custom speed without version",
 			params: Params{
 				FFmpegPath: "/usr/local/bin/ffmpeg-v2",
-				Token:      "tok456",
 				InputPath:  "/tmp/concat.txt",
 				Speed:      1.75,
 				SeekOffset: 120.5,
 				IsConcat:   true,
 			},
-			wantSubstr: []string{"-f", "concat", "-safe", "0", "-protocol_whitelist", "-ss", "120.50", "-filter:a", "atempo=1.75"},
-			notSubstr:  nil,
+			wantSubstr: []string{"-user_agent", "abstp", "-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-ss", "120.50", "-filter:a", "atempo=1.75"},
+			notSubstr:  []string{"-headers"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			args := BuildArgs(tt.params)
+			args := BuildArgs(&tt.params)
 			for _, w := range tt.wantSubstr {
 				if !slices.Contains(args, w) {
 					t.Errorf("expected arg %q in %v", w, args)
@@ -64,6 +64,10 @@ func TestBuildArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	if nilArgs := BuildArgs(nil); nilArgs != nil {
+		t.Errorf("expected nil args for nil params, got %v", nilArgs)
 	}
 }
 
@@ -153,7 +157,7 @@ func TestGenerateConcatFile_Errors(t *testing.T) {
 func TestStartProcess_Success(t *testing.T) {
 	t.Parallel()
 
-	cmd, stdout, startErr := StartProcess(context.Background(), Params{
+	cmd, stdout, stderr, startErr := StartProcess(context.Background(), &Params{
 		FFmpegPath: "echo",
 		InputPath:  "test",
 		Speed:      1.0,
@@ -161,8 +165,8 @@ func TestStartProcess_Success(t *testing.T) {
 	if startErr != nil {
 		t.Fatalf("unexpected error starting process: %v", startErr)
 	}
-	if cmd == nil || stdout == nil {
-		t.Fatal("expected non-nil cmd and stdout")
+	if cmd == nil || stdout == nil || stderr == nil {
+		t.Fatal("expected non-nil cmd, stdout and stderr")
 	}
 	if _, readErr := io.ReadAll(stdout); readErr != nil {
 		t.Errorf("read stdout error: %v", readErr)
@@ -176,14 +180,18 @@ func TestStartProcess_Success(t *testing.T) {
 }
 
 func TestStartProcess_Errors(t *testing.T) {
-	if _, _, invalidCmdErr := StartProcess(context.Background(), Params{
+	if _, _, _, nilErr := StartProcess(context.Background(), nil); nilErr == nil {
+		t.Fatal("expected error for nil params")
+	}
+
+	if _, _, _, invalidCmdErr := StartProcess(context.Background(), &Params{
 		FFmpegPath: "nonexistent_binary_xyz_123",
 	}); invalidCmdErr == nil {
 		t.Fatal("expected error looking up non-existent binary")
 	}
 
 	t.Setenv("PATH", t.TempDir())
-	if _, _, defErr := StartProcess(context.Background(), Params{
+	if _, _, _, defErr := StartProcess(context.Background(), &Params{
 		FFmpegPath: "ffmpeg",
 	}); defErr == nil {
 		t.Fatal("expected error starting ffmpeg when not in PATH")
@@ -199,7 +207,7 @@ func TestStartProcess_StdoutPipeError(t *testing.T) {
 	}
 	defer func() { commandContext = origCmd }()
 
-	if _, _, pipeErr := StartProcess(context.Background(), Params{
+	if _, _, _, pipeErr := StartProcess(context.Background(), &Params{
 		FFmpegPath: "true",
 	}); pipeErr == nil {
 		t.Fatal("expected error creating stdout pipe when Stdout is already set")
@@ -220,8 +228,30 @@ func TestStartProcess_StartError(t *testing.T) {
 	}
 	defer func() { commandContext = origCmd }()
 
-	if _, _, err := StartProcess(context.Background(), Params{FFmpegPath: "false"}); err == nil {
+	if _, _, _, err := StartProcess(context.Background(), &Params{FFmpegPath: "false"}); err == nil {
 		t.Fatal("expected error starting command with invalid dir")
+	}
+}
+
+func TestLimitedWriter(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	lw := &limitedWriter{buf: buf, limit: 10}
+
+	n, err := lw.Write([]byte("hello"))
+	if err != nil || n != 5 || buf.String() != "hello" {
+		t.Fatalf("unexpected write result: n=%d err=%v buf=%s", n, err, buf.String())
+	}
+
+	n, err = lw.Write([]byte("world-extra"))
+	if err != nil || n != 5 || buf.String() != "helloworld" {
+		t.Fatalf("unexpected write result exceeding limit: n=%d err=%v buf=%s", n, err, buf.String())
+	}
+
+	n, err = lw.Write([]byte("more"))
+	if err != nil || n != 4 || buf.String() != "helloworld" {
+		t.Fatalf("unexpected write result when full: n=%d err=%v buf=%s", n, err, buf.String())
 	}
 }
 

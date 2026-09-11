@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/absclient"
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/session"
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 )
 
 func TestStream_Errors(t *testing.T) {
@@ -234,6 +236,7 @@ func TestStream_DebugAndProbes(t *testing.T) {
 	h, store := newTestEnv(t, nil)
 	h.cfg.Debug = true
 	h.keepaliveInterval = 5 * time.Millisecond
+	h.progressInterval = 5 * time.Millisecond
 
 	reqInvalid := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/stream/sess-nonexistent.aac?token=bad-token", http.NoBody)
 	reqInvalid.SetPathValue("session_id", "sess-nonexistent.aac")
@@ -707,5 +710,129 @@ func TestExtractNarrator(t *testing.T) {
 				t.Errorf("extractNarrator() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLogStreamEnd(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	sess := &session.Session{
+		ID: "sess-log-end",
+	}
+	sess.BytesSent.Store(12345)
+
+	stderrBuf := bytes.NewBufferString("sample error line 1\r\nsample error line 2\n")
+	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "ffmpeg_read_error", stderrBuf)
+
+	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "eof", nil)
+
+	emptyBuf := bytes.NewBuffer(nil)
+	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "eof", emptyBuf)
+}
+
+func TestLogStreamProgress_IntervalFallbackAndStop(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	h.progressInterval = 0
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	sess := &session.Session{
+		ID:          "sess-prog-cancel",
+		CurrentTime: 0,
+		Duration:    100,
+		Speed:       1.0,
+	}
+
+	stop := make(chan struct{})
+	h.logStreamProgress(ctx, sess, "sess-prog-cancel", time.Now(), stop)
+
+	ctx2 := t.Context()
+	stop2 := make(chan struct{})
+	close(stop2)
+	h.logStreamProgress(ctx2, sess, "sess-prog-stop", time.Now(), stop2)
+}
+
+func TestLogStreamProgress_Ticker(t *testing.T) {
+	t.Parallel()
+
+	h, _ := newTestEnv(t, nil)
+	h.progressInterval = 5 * time.Millisecond
+
+	ctx := t.Context()
+	sess := &session.Session{
+		ID:          "sess-prog-tick",
+		CurrentTime: 10,
+		Duration:    100,
+		Speed:       1.0,
+	}
+
+	stop := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		close(stop)
+	}()
+
+	h.logStreamProgress(ctx, sess, "sess-prog-tick", time.Now(), stop)
+}
+
+func TestRegisterTrackProxySession_NilProxy(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{}
+	port, token, cleanup, err := h.registerTrackProxySession("sess-nil", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if port != 0 || token != "" {
+		t.Errorf("expected 0 port and empty token, got %d, %q", port, token)
+	}
+	cleanup()
+}
+
+func TestDefaultTrackProxyRegisterSession_Error(t *testing.T) {
+	cleanup := trackproxy.SetGenerateToken(func() (string, error) {
+		return "", errors.New("token generator error")
+	})
+	defer cleanup()
+
+	tp := trackproxy.New("http://test.example.net", "token", "1.0", false)
+	if _, err := defaultTrackProxyRegisterSession(tp, "sess-err", []string{"/unique-err-track.mp3"}); err == nil {
+		t.Error("expected error when token generation fails")
+	}
+}
+
+func TestHandleStream_RegisterTrackProxyError(t *testing.T) {
+	h, store := newTestEnv(t, nil)
+	token, err := store.Create(&session.Session{
+		ID: "sess-reg-fail",
+	})
+	if err != nil {
+		t.Fatalf("create session error: %v", err)
+	}
+
+	trackProxyRegisterSessionMu.Lock()
+	origRegister := trackProxyRegisterSession
+	trackProxyRegisterSession = func(_ *trackproxy.Server, _ string, _ []string) (string, error) {
+		return "", errors.New("registration failed")
+	}
+	trackProxyRegisterSessionMu.Unlock()
+	defer func() {
+		trackProxyRegisterSessionMu.Lock()
+		trackProxyRegisterSession = origRegister
+		trackProxyRegisterSessionMu.Unlock()
+	}()
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/stream/sess-reg-fail.mp3?token="+token, http.NoBody)
+	req.SetPathValue("session_id", "sess-reg-fail.mp3")
+	rec := httptest.NewRecorder()
+
+	h.HandleStream(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 Internal Server Error, got %d", rec.Code)
 	}
 }

@@ -28,6 +28,8 @@ services:
         required: false
     environment:
       - ABSTP_ABS_URL=${ABSTP_ABS_URL:-https://abs.example.org}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
     secrets:
       - abstp_abs_token
       - abstp_api_key

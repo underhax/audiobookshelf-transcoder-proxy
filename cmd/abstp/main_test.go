@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/trackproxy"
 )
 
 type roundTripFunc func(req *http.Request) (*http.Response, error)
@@ -431,5 +433,78 @@ func TestMain_Execution(t *testing.T) {
 
 	if !fatalCalled {
 		t.Error("expected logFatalf to be called on runFunc failure")
+	}
+}
+
+func TestRun_TrackProxyStartError(t *testing.T) {
+	origStart := startTrackProxy
+	defer func() { startTrackProxy = origStart }()
+
+	startTrackProxy = func(_ *trackproxy.Server) (int, error) {
+		return 0, errors.New("trackproxy start failure")
+	}
+
+	err := run(nil, validTestEnv(), syscall.SIGTERM)
+	if err == nil || !strings.Contains(err.Error(), "start track proxy: trackproxy start failure") {
+		t.Fatalf("expected trackproxy start error, got: %v", err)
+	}
+}
+
+func TestRun_TrackProxyShutdownError(t *testing.T) {
+	origShutdown := shutdownTrackProxy
+	origNotify := notifySignals
+	defer func() {
+		shutdownTrackProxy = origShutdown
+		notifySignals = origNotify
+	}()
+
+	notifySignals = func(c chan<- os.Signal, _ ...os.Signal) {
+		c <- syscall.SIGINT
+	}
+
+	shutdownTrackProxy = func(_ context.Context, _ *trackproxy.Server) error {
+		return errors.New("trackproxy shutdown failure")
+	}
+
+	err := run(nil, validTestEnv(), syscall.SIGINT)
+	if err != nil {
+		t.Fatalf("unexpected run error: %v", err)
+	}
+}
+
+func TestDefaultStartTrackProxy_Error(t *testing.T) {
+	cleanup := trackproxy.SetNetListen(func(_ context.Context, _, _ string) (net.Listener, error) {
+		return nil, errors.New("listen failure")
+	})
+	defer cleanup()
+
+	tp := trackproxy.New("http://start-err.example.net", "token", "1.0", false)
+	if _, err := defaultStartTrackProxy(tp); err == nil {
+		t.Error("expected error when tp.Start fails")
+	}
+}
+
+func TestDefaultShutdownTrackProxy_Error(t *testing.T) {
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen error: %v", err)
+	}
+
+	el := &errListener{Listener: ln}
+	cleanup := trackproxy.SetNetListen(func(_ context.Context, _, _ string) (net.Listener, error) {
+		return el, nil
+	})
+	defer cleanup()
+
+	tp := trackproxy.New("http://shut-err.example.net", "token", "1.0", false)
+	if _, err := tp.Start(); err != nil {
+		t.Fatalf("start error: %v", err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+
+	if err := defaultShutdownTrackProxy(context.Background(), tp); err == nil {
+		t.Error("expected error when listener close fails")
 	}
 }

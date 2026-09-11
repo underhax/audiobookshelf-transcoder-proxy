@@ -50,6 +50,14 @@ func (c *cancelOnReadReader) Read(_ []byte) (int, error) {
 	return 0, errors.New("context cancelled during read")
 }
 
+type errOnReadReader struct {
+	err error
+}
+
+func (r *errOnReadReader) Read(_ []byte) (int, error) {
+	return 0, r.err
+}
+
 func TestCalculateSeekOffset(t *testing.T) {
 	t.Parallel()
 
@@ -73,10 +81,35 @@ func TestCalculateSeekOffset(t *testing.T) {
 func TestPrepareInput_EmptyTracks(t *testing.T) {
 	t.Parallel()
 
-	_, _, _, err := prepareInput("http://abs.example.com", []absclient.AudioTrack{}, 0)
+	_, _, _, err := prepareInput(8080, "sess-empty", "dummy-tok", []absclient.AudioTrack{}, 0)
 	if err == nil {
 		t.Fatal("expected error when audio tracks slice is empty")
 	}
+}
+
+func TestPrepareInput_SingleTrack(t *testing.T) {
+	t.Parallel()
+
+	tracks := []absclient.AudioTrack{
+		{Index: 0, ContentURL: "/single.mp3"},
+	}
+	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-single", "token-single", tracks, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !isConcat {
+		t.Fatal("expected isConcat true for single track to hide tokens in ps aux")
+	}
+	cleanPath := filepath.Clean(filePath)
+	content, readErr := os.ReadFile(cleanPath)
+	if readErr != nil {
+		t.Fatalf("read concat file: %v", readErr)
+	}
+	expectedEntry := "http://127.0.0.1:54321/track/sess-single/0?token=token-single"
+	if !strings.Contains(string(content), expectedEntry) {
+		t.Fatalf("expected concat content to contain %s, got %s", expectedEntry, string(content))
+	}
+	cleanup()
 }
 
 func TestPrepareInput_GenerateConcatError(t *testing.T) {
@@ -85,7 +118,7 @@ func TestPrepareInput_GenerateConcatError(t *testing.T) {
 		{Index: 0, ContentURL: "/t1.mp3"},
 		{Index: 1, ContentURL: "/t2.mp3"},
 	}
-	if _, _, _, err := prepareInput("http://abs.example.com", tracks, 0); err == nil {
+	if _, _, _, err := prepareInput(8080, "sess-concat-err", "dummy-tok", tracks, 0); err == nil {
 		t.Fatal("expected error from defaultGenerateConcat when TMPDIR is invalid")
 	}
 }
@@ -107,7 +140,7 @@ func TestPrepareInput_CleanupError(t *testing.T) {
 		{Index: 0, ContentURL: "/cleanup-track-1.mp3"},
 		{Index: 1, ContentURL: "/cleanup-track-2.mp3"},
 	}
-	_, _, cleanup, err := prepareInput("http://abs.example.com", tracks, 0)
+	_, _, cleanup, err := prepareInput(8080, "sess-cleanup", "dummy-tok", tracks, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -237,14 +270,15 @@ func TestTerminateProcess(t *testing.T) {
 
 	cmdNil := exec.CommandContext(ctx, "echo", "test")
 	closerErr := &testCloser{err: errors.New("close failure")}
-	terminateProcess(closerErr, cmdNil)
+	terminateProcess("sess-term-nil", closerErr, cmdNil)
 
 	cmdRun := exec.CommandContext(ctx, "sleep", "5")
 	if err := cmdRun.Start(); err != nil {
 		t.Fatalf("start sleep error: %v", err)
 	}
 	closerOk := &testCloser{err: nil}
-	terminateProcess(closerOk, cmdRun)
+	terminateProcess("sess-term-run", closerOk, cmdRun)
+	terminateProcess("sess-term-cmd-nil", closerOk, nil)
 }
 
 func TestTerminateProcess_ProcessKillError(t *testing.T) {
@@ -265,7 +299,7 @@ func TestTerminateProcess_ProcessKillError(t *testing.T) {
 		t.Fatalf("run true: %v", err)
 	}
 	closer := &testCloser{}
-	terminateProcess(closer, cmd)
+	terminateProcess("sess-term-kill-err", closer, cmd)
 
 	if cmd.Process != nil {
 		if err := defaultProcessKill(cmd.Process); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -415,4 +449,24 @@ func TestPipeStreamToClient_DefaultIntervalFallback(t *testing.T) {
 
 	rw := ratelimit.NewWriter(ctx, &bytes.Buffer{}, 1000, 1000)
 	h.pipeStreamToClient(ctx, strings.NewReader("data"), rw, sess)
+}
+
+func TestPipeStreamToClient_ReadError(t *testing.T) {
+	t.Parallel()
+
+	h, store := newTestEnv(t, nil)
+	sess := &session.Session{
+		ID:    "sess-pipe-read-err",
+		Speed: 1.0,
+	}
+	if _, err := store.Create(sess); err != nil {
+		t.Fatalf("create sess: %v", err)
+	}
+
+	ctx := t.Context()
+	rw := ratelimit.NewWriter(ctx, &bytes.Buffer{}, 1000, 1000)
+	reason := h.pipeStreamToClient(ctx, &errOnReadReader{err: errors.New("read failure")}, rw, sess)
+	if reason != "ffmpeg_read_error" {
+		t.Errorf("expected reason ffmpeg_read_error, got %s", reason)
+	}
 }

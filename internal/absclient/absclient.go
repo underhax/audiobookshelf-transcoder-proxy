@@ -9,18 +9,38 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+)
+
+const (
+	defaultLibrariesCacheTTL    = 5 * time.Minute
+	defaultLibraryItemsCacheTTL = 1 * time.Minute
+	defaultProgressCacheTTL     = 5 * time.Second
 )
 
 // Client encapsulates HTTP communication and session synchronization with the upstream Audiobookshelf server.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	token      string
-	version    string
+	progressCachedAt   time.Time
+	librariesCachedAt  time.Time
+	cachedLibraryItems map[string]cachedLibraryItemsEntry
+	cachedByItem       map[string]rawMediaProgressEntry
+	httpClient         *http.Client
+	cachedByEpisode    map[string]rawMediaProgressEntry
+	version            string
+	token              string
+	baseURL            string
+	cachedLibraries    []Library
+	librariesTTL       time.Duration
+	libraryItemsTTL    time.Duration
+	progressTTL        time.Duration
+	librariesMu        sync.Mutex
+	libraryItemsMu     sync.Mutex
+	progressMu         sync.Mutex
 }
 
 // New initializes an Audiobookshelf API client with credentials and HTTP transport settings.
@@ -30,16 +50,25 @@ func New(baseURL, token, version string, httpClient *http.Client) *Client {
 	}
 	cleanBase := strings.TrimRight(baseURL, "/")
 	return &Client{
-		baseURL:    cleanBase,
-		token:      token,
-		version:    version,
-		httpClient: httpClient,
+		baseURL:            cleanBase,
+		token:              token,
+		version:            version,
+		httpClient:         httpClient,
+		cachedLibraryItems: make(map[string]cachedLibraryItemsEntry),
+		librariesTTL:       defaultLibrariesCacheTTL,
+		libraryItemsTTL:    defaultLibraryItemsCacheTTL,
+		progressTTL:        defaultProgressCacheTTL,
 	}
 }
 
 // BaseURL returns the resolved target URL for Audiobookshelf requests.
 func (c *Client) BaseURL() string {
 	return c.baseURL
+}
+
+// Version returns the client application version string used for user agent headers and transcoding identification.
+func (c *Client) Version() string {
+	return c.version
 }
 
 // SetBaseURL updates the base URL when subpath probing dynamically discovers reverse proxy prefixes.
@@ -97,6 +126,7 @@ func (c *Client) newRequest(ctx context.Context, method, endpoint string, body a
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", "abstp/"+c.version)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -359,25 +389,50 @@ type librariesResponse struct {
 	Libraries []Library `json:"libraries"`
 }
 
+type rawLibraryItemResult struct {
+	UserMediaProgress *struct {
+		CurrentTime float64 `json:"currentTime"`
+	} `json:"userMediaProgress"`
+	ID    string `json:"id"`
+	Media struct {
+		Metadata struct {
+			Title        string `json:"title"`
+			AuthorName   string `json:"authorName"`
+			NarratorName string `json:"narratorName"`
+		} `json:"metadata"`
+		Duration float64 `json:"duration"`
+	} `json:"media"`
+}
+
+type cachedLibraryItemsEntry struct {
+	cachedAt time.Time
+	items    []rawLibraryItemResult
+}
+
 type libraryItemsResponse struct {
-	Results []struct {
-		UserMediaProgress *struct {
-			CurrentTime float64 `json:"currentTime"`
-		} `json:"userMediaProgress"`
-		ID    string `json:"id"`
-		Media struct {
-			Metadata struct {
-				Title        string `json:"title"`
-				AuthorName   string `json:"authorName"`
-				NarratorName string `json:"narratorName"`
-			} `json:"metadata"`
-			Duration float64 `json:"duration"`
-		} `json:"media"`
-	} `json:"results"`
+	Results []rawLibraryItemResult `json:"results"`
 }
 
 // GetLibraries fetches configured library collections to discover available audiobook and podcast repositories.
 func (c *Client) GetLibraries(ctx context.Context) ([]Library, error) {
+	c.librariesMu.Lock()
+	defer c.librariesMu.Unlock()
+
+	ttl := c.librariesTTL
+	if ttl <= 0 {
+		ttl = defaultLibrariesCacheTTL
+	}
+
+	if time.Since(c.librariesCachedAt) < ttl && c.cachedLibraries != nil {
+		libs := make([]Library, len(c.cachedLibraries))
+		copy(libs, c.cachedLibraries)
+		return libs, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
 	req, err := c.newRequest(ctx, http.MethodGet, "/api/libraries", nil)
 	if err != nil {
 		return nil, err
@@ -396,7 +451,63 @@ func (c *Client) GetLibraries(ctx context.Context) ([]Library, error) {
 		return nil, fmt.Errorf("unmarshal libraries response: %w", err)
 	}
 
-	return resp.Libraries, nil
+	c.cachedLibraries = resp.Libraries
+	c.librariesCachedAt = time.Now()
+
+	libs := make([]Library, len(c.cachedLibraries))
+	copy(libs, c.cachedLibraries)
+	return libs, nil
+}
+
+func (c *Client) fetchLibraryItems(ctx context.Context, libID string) ([]rawLibraryItemResult, error) {
+	c.libraryItemsMu.Lock()
+	defer c.libraryItemsMu.Unlock()
+
+	ttl := c.libraryItemsTTL
+	if ttl <= 0 {
+		ttl = defaultLibraryItemsCacheTTL
+	}
+
+	if entry, ok := c.cachedLibraryItems[libID]; ok && time.Since(entry.cachedAt) < ttl {
+		items := make([]rawLibraryItemResult, len(entry.items))
+		copy(items, entry.items)
+		return items, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("/api/libraries/%s/items", libID)
+	req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	status, body, err := c.sendAndReadBody(req)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("get library items for %s failed with status %d: %s", libID, status, string(body))
+	}
+
+	var resp libraryItemsResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal library items response: %w", err)
+	}
+
+	if c.cachedLibraryItems == nil {
+		c.cachedLibraryItems = make(map[string]cachedLibraryItemsEntry)
+	}
+	c.cachedLibraryItems[libID] = cachedLibraryItemsEntry{
+		cachedAt: time.Now(),
+		items:    resp.Results,
+	}
+
+	items := make([]rawLibraryItemResult, len(resp.Results))
+	copy(items, resp.Results)
+	return items, nil
 }
 
 // GetMediaItems retrieves audiobooks or podcasts from all accessible libraries to build client catalog feeds.
@@ -414,26 +525,12 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 			continue
 		}
 
-		endpoint := fmt.Sprintf("/api/libraries/%s/items", lib.ID)
-		req, reqErr := c.newRequest(ctx, http.MethodGet, endpoint, nil)
-		if reqErr != nil {
-			return nil, reqErr
+		rawItems, fetchErr := c.fetchLibraryItems(ctx, lib.ID)
+		if fetchErr != nil {
+			return nil, fetchErr
 		}
 
-		status, body, sendErr := c.sendAndReadBody(req)
-		if sendErr != nil {
-			return nil, sendErr
-		}
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("get library items for %s failed with status %d: %s", lib.ID, status, string(body))
-		}
-
-		var resp libraryItemsResponse
-		if unmarshalErr := json.Unmarshal(body, &resp); unmarshalErr != nil {
-			return nil, fmt.Errorf("unmarshal library items response: %w", unmarshalErr)
-		}
-
-		for _, it := range resp.Results {
+		for _, it := range rawItems {
 			progress := 0.0
 			isFinished := false
 			if prog, ok := byItem[it.ID]; ok {
@@ -624,6 +721,25 @@ func (c *Client) GetInProgressItems(ctx context.Context) ([]InProgressItem, erro
 }
 
 func (c *Client) fetchProgressLookups(ctx context.Context) (byItem, byEpisode map[string]rawMediaProgressEntry) {
+	c.progressMu.Lock()
+	defer c.progressMu.Unlock()
+
+	ttl := c.progressTTL
+	if ttl <= 0 {
+		ttl = defaultProgressCacheTTL
+	}
+
+	if time.Since(c.progressCachedAt) < ttl && c.cachedByItem != nil {
+		return copyProgressLookups(c.cachedByItem, c.cachedByEpisode)
+	}
+
+	if ctx.Err() != nil {
+		if c.cachedByItem != nil {
+			return copyProgressLookups(c.cachedByItem, c.cachedByEpisode)
+		}
+		return make(map[string]rawMediaProgressEntry), make(map[string]rawMediaProgressEntry)
+	}
+
 	byItem = make(map[string]rawMediaProgressEntry)
 	byEpisode = make(map[string]rawMediaProgressEntry)
 
@@ -651,6 +767,18 @@ func (c *Client) fetchProgressLookups(ctx context.Context) (byItem, byEpisode ma
 		}
 	}
 
+	c.cachedByItem = byItem
+	c.cachedByEpisode = byEpisode
+	c.progressCachedAt = time.Now()
+
+	return copyProgressLookups(byItem, byEpisode)
+}
+
+func copyProgressLookups(srcItem, srcEpisode map[string]rawMediaProgressEntry) (byItem, byEpisode map[string]rawMediaProgressEntry) {
+	byItem = make(map[string]rawMediaProgressEntry, len(srcItem))
+	maps.Copy(byItem, srcItem)
+	byEpisode = make(map[string]rawMediaProgressEntry, len(srcEpisode))
+	maps.Copy(byEpisode, srcEpisode)
 	return byItem, byEpisode
 }
 

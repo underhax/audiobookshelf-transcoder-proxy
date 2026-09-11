@@ -25,6 +25,7 @@ import (
 
 const sessionIdleTimeout = 45 * time.Second
 const streamAcquireTimeout = 2 * time.Second
+const defaultSpoolBytes = 256 * 1024
 
 type sessionState struct {
 	sem          chan struct{}
@@ -43,6 +44,7 @@ type Server struct {
 	token       string
 	version     string
 	retryDelays []time.Duration
+	spoolBytes  int
 	port        int
 	debug       bool
 }
@@ -70,6 +72,7 @@ func New(absURL, token, version string, debug bool) *Server {
 			8 * time.Second,
 			16 * time.Second,
 		},
+		spoolBytes: defaultSpoolBytes,
 	}
 }
 
@@ -213,6 +216,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 type rangeHeader struct {
+	raw   string
 	end   string
 	start int64
 	has   bool
@@ -224,17 +228,26 @@ func parseRange(header string) rangeHeader {
 	}
 	raw := strings.TrimPrefix(header, "bytes=")
 	parts := strings.SplitN(raw, "-", 2)
+	if len(parts) != 2 {
+		return rangeHeader{}
+	}
+	if parts[0] == "" {
+		if _, err := strconv.ParseInt(parts[1], 10, 64); err != nil {
+			return rangeHeader{}
+		}
+		return rangeHeader{
+			raw: header,
+			has: true,
+		}
+	}
 	start, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return rangeHeader{}
 	}
-	var end string
-	if len(parts) == 2 {
-		end = parts[1]
-	}
 	return rangeHeader{
+		raw:   header,
 		start: start,
-		end:   end,
+		end:   parts[1],
 		has:   true,
 	}
 }
@@ -339,6 +352,10 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session_id")
 	trackIdxStr := r.PathValue("track_index")
 
+	if s.debug {
+		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: %s /track/%s/%s from %s, Range=%q, UA=%q", r.Method, sessionID, trackIdxStr, r.RemoteAddr, r.Header.Get("Range"), r.UserAgent()), "\n", " "), "\r", ""))
+	}
+
 	state, status, errMsg := s.getActiveSession(r, sessionID)
 	if status != 0 {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, errMsg), status)
@@ -393,12 +410,14 @@ func (s *Server) newUpstreamRequest(ctx context.Context, targetURL string, curre
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	if initRange.has || hasBytes {
+	if hasBytes {
 		if initRange.end != "" {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%s", currentStart, initRange.end))
 		} else {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", currentStart))
 		}
+	} else if initRange.has {
+		req.Header.Set("Range", initRange.raw)
 	}
 
 	return req, nil
@@ -437,12 +456,51 @@ func (s *Server) executeAttempt(w http.ResponseWriter, r *http.Request, upstream
 	}
 
 	if !*headersSent {
+		if s.debug {
+			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: upstream status=%d, Content-Length=%d, Content-Range=%q", resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Range")), "\n", " "), "\r", ""))
+		}
+
+		committed, completed, commitErr := s.commitInitialHeaders(w, resp, flusher, bytesWritten, headersSent, lastActivity)
+		if commitErr != nil {
+			return false, commitErr
+		}
+		if !committed || completed {
+			return completed, nil
+		}
+	}
+
+	return streamResponseBody(w, resp.Body, flusher, bytesWritten, lastActivity, resp.ContentLength)
+}
+
+func (s *Server) commitInitialHeaders(w http.ResponseWriter, resp *http.Response, flusher http.Flusher, bytesWritten *int64, headersSent *bool, lastActivity *atomic.Int64) (committed, completed bool, err error) {
+	spooled, eof, spoolErr := readSpool(resp.Body, s.spoolBytes)
+	if spoolErr != nil {
+		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream spool read failed: %v", spoolErr), "\n", " "), "\r", ""))
+		return false, false, nil
+	}
+
+	if eof && (resp.ContentLength < 0 || int64(len(spooled)) == resp.ContentLength) {
 		forwardHeaders(w, resp)
 		w.WriteHeader(resp.StatusCode)
 		*headersSent = true
+		if writeErr := writeBodyChunk(w, spooled, flusher, bytesWritten, lastActivity); writeErr != nil {
+			return true, false, writeErr
+		}
+		return true, true, nil
 	}
 
-	return streamResponseBody(w, resp.Body, flusher, bytesWritten, lastActivity)
+	if eof {
+		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream stream ended at %d bytes, expected %d, retrying without commit", len(spooled), resp.ContentLength), "\n", " "), "\r", ""))
+		return false, false, nil
+	}
+
+	forwardHeaders(w, resp)
+	w.WriteHeader(resp.StatusCode)
+	*headersSent = true
+	if writeErr := writeBodyChunk(w, spooled, flusher, bytesWritten, lastActivity); writeErr != nil {
+		return true, false, writeErr
+	}
+	return true, false, nil
 }
 
 func (s *Server) proxyWithRetry(w http.ResponseWriter, r *http.Request, upstreamURL string, initRange rangeHeader, lastActivity *atomic.Int64) {
@@ -486,32 +544,76 @@ func forwardHeaders(w http.ResponseWriter, resp *http.Response) {
 			w.Header().Set(h, v)
 		}
 	}
+	if resp.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+	} else if cl := resp.Header.Get("Content-Length"); cl != "" {
+		w.Header().Set("Content-Length", cl)
+	}
 }
 
-func streamResponseBody(w http.ResponseWriter, body io.Reader, flusher http.Flusher, bytesWritten *int64, lastActivity *atomic.Int64) (bool, error) {
+func writeBodyChunk(w http.ResponseWriter, data []byte, flusher http.Flusher, bytesWritten *int64, lastActivity *atomic.Int64) error {
+	if len(data) == 0 {
+		return nil
+	}
+	nw, writeErr := w.Write(data)
+	*bytesWritten += int64(nw)
+	if lastActivity != nil {
+		lastActivity.Store(time.Now().UnixNano())
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write response chunk: %w", writeErr)
+	}
+	return nil
+}
+
+func streamResponseBody(w http.ResponseWriter, body io.Reader, flusher http.Flusher, bytesWritten *int64, lastActivity *atomic.Int64, expectedLength int64) (bool, error) {
+	attemptStart := *bytesWritten
 	buf := make([]byte, 32*1024)
 	for {
 		nr, readErr := body.Read(buf)
 		if nr > 0 {
-			nw, writeErr := w.Write(buf[:nr])
-			*bytesWritten += int64(nw)
-			if lastActivity != nil {
-				lastActivity.Store(time.Now().UnixNano())
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-			if writeErr != nil {
-				return false, fmt.Errorf("write response chunk: %w", writeErr)
+			if writeErr := writeBodyChunk(w, buf[:nr], flusher, bytesWritten, lastActivity); writeErr != nil {
+				return false, writeErr
 			}
 		}
 
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
+				if expectedLength >= 0 && *bytesWritten-attemptStart != expectedLength {
+					log.Printf("[WARN] trackproxy: upstream stream ended at %d bytes, expected %d", *bytesWritten-attemptStart, expectedLength)
+					return false, nil
+				}
 				return true, nil
 			}
 			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream stream read error: %v", readErr), "\n", " "), "\r", ""))
 			return false, nil
 		}
 	}
+}
+
+func readSpool(body io.Reader, spoolSize int) (spooled []byte, eof bool, err error) {
+	if spoolSize <= 0 {
+		return nil, false, errors.New("invalid spool size")
+	}
+	buf := make([]byte, spoolSize)
+	total := 0
+	for total < spoolSize {
+		n, readErr := body.Read(buf[total:])
+		if n > 0 {
+			total += n
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return buf[:total], true, nil
+			}
+			return nil, false, fmt.Errorf("spool read: %w", readErr)
+		}
+		if n == 0 {
+			return nil, false, errors.New("empty read without error")
+		}
+	}
+	return buf, false, nil
 }

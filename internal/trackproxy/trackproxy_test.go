@@ -1,7 +1,6 @@
 package trackproxy
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -26,6 +25,12 @@ type errAfterReader struct {
 	err    error
 	data   []byte
 	offset int
+}
+
+type emptyNoErrReader struct{}
+
+func (r *emptyNoErrReader) Read(_ []byte) (int, error) {
+	return 0, nil
 }
 
 func (r *errAfterReader) Read(p []byte) (int, error) {
@@ -160,9 +165,10 @@ func TestServer_Token_Validation(t *testing.T) {
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("valid-token-data")),
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("valid-token-data")),
+				ContentLength: -1,
 			}, nil
 		}),
 	}
@@ -390,9 +396,10 @@ func TestServer_Sequential_Requests(t *testing.T) {
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("track-chunk-data")),
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("track-chunk-data")),
+				ContentLength: -1,
 			}, nil
 		}),
 	}
@@ -439,9 +446,10 @@ func TestServer_Proxy_NormalStream(t *testing.T) {
 				t.Errorf("expected User-Agent abstp/%s, got %s", version, ua)
 			}
 			resp := &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(expectedPayload)),
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(expectedPayload)),
+				ContentLength: -1,
 			}
 			resp.Header.Set("Content-Type", "audio/mpeg")
 			resp.Header.Set("Accept-Ranges", "bytes")
@@ -483,9 +491,10 @@ func TestServer_Proxy_RangeForwarding(t *testing.T) {
 				t.Errorf("expected Range bytes=10-20, got %s", rangeHdr)
 			}
 			resp := &http.Response{
-				StatusCode: http.StatusPartialContent,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("partialdata")),
+				StatusCode:    http.StatusPartialContent,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("partialdata")),
+				ContentLength: -1,
 			}
 			resp.Header.Set("Content-Range", "bytes 10-20/100")
 			return resp, nil
@@ -515,64 +524,94 @@ func TestServer_Proxy_RangeForwarding(t *testing.T) {
 	}
 }
 
-func TestServer_Proxy_MidStreamDisconnectAndResume(t *testing.T) {
-	part1 := "first-chunk-of-data-"
-	part2 := "second-chunk-resumed"
-	var requestCount atomic.Int32
-
-	s := New("http://example.com", "token", "test", true)
-	s.retryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
-	s.httpClient = &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			reqNum := requestCount.Add(1)
-			if reqNum == 1 {
-				resp := &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     make(http.Header),
-					Body: &errAfterReader{
-						data: []byte(part1),
-						err:  errors.New("tcp connection drop"),
-					},
-				}
-				resp.Header.Set("Content-Type", "audio/mpeg")
-				return resp, nil
-			}
-
-			expectedRange := "bytes=20-"
-			if req.Header.Get("Range") != expectedRange {
-				t.Errorf("expected Range %s on resume, got %s", expectedRange, req.Header.Get("Range"))
-			}
-
-			resp := &http.Response{
-				StatusCode: http.StatusPartialContent,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(bytes.NewReader([]byte(part2))),
-			}
-			resp.Header.Set("Content-Type", "audio/mpeg")
-			return resp, nil
-		}),
+func TestServer_Proxy_ResumeAfterUpstreamDrop(t *testing.T) {
+	tests := []struct {
+		initialRange    string
+		name            string
+		firstPart       string
+		secondPart      string
+		wantResumeRange string
+	}{
+		{
+			name:            "bounded range resume",
+			initialRange:    "bytes=10-20",
+			firstPart:       "abcde",
+			secondPart:      "fghij",
+			wantResumeRange: "bytes=15-20",
+		},
+		{
+			name:            "open ended stream resume",
+			firstPart:       "first-chunk-of-data-",
+			secondPart:      "second-chunk-resumed",
+			wantResumeRange: "bytes=20-",
+		},
 	}
 
-	sessionID := "sess-resume"
-	token, err := s.RegisterSession(sessionID, []string{"/track.mp3"})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestCount atomic.Int32
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-	req.Header.Set("User-Agent", "abstp/1.0.0")
-	req.SetPathValue("session_id", sessionID)
-	req.SetPathValue("track_index", "0")
+			s := New("http://example.com", "token", "test", true)
+			s.spoolBytes = 2
+			s.retryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
+			s.httpClient = &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					reqNum := requestCount.Add(1)
+					if reqNum == 1 {
+						if tt.initialRange != "" && req.Header.Get("Range") != tt.initialRange {
+							t.Errorf("expected Range %q on attempt 1, got %q", tt.initialRange, req.Header.Get("Range"))
+						}
+						resp := &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body: &errAfterReader{
+								data: []byte(tt.firstPart),
+								err:  errors.New("tcp drop"),
+							},
+						}
+						resp.Header.Set("Content-Type", "audio/mpeg")
+						return resp, nil
+					}
 
-	rec := httptest.NewRecorder()
-	s.handleTrack(rec, req)
+					if req.Header.Get("Range") != tt.wantResumeRange {
+						t.Errorf("expected Range %q on resume, got %q", tt.wantResumeRange, req.Header.Get("Range"))
+					}
 
-	expectedCombined := part1 + part2
-	if rec.Body.String() != expectedCombined {
-		t.Fatalf("expected combined %q, got %q", expectedCombined, rec.Body.String())
-	}
-	if requestCount.Load() != 2 {
-		t.Fatalf("expected exactly 2 upstream requests, got %d", requestCount.Load())
+					resp := &http.Response{
+						StatusCode:    http.StatusPartialContent,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(strings.NewReader(tt.secondPart)),
+						ContentLength: -1,
+					}
+					resp.Header.Set("Content-Type", "audio/mpeg")
+					return resp, nil
+				}),
+			}
+
+			sessionID := "sess-resume-drop"
+			token, err := s.RegisterSession(sessionID, []string{"/track.mp3"})
+			if err != nil {
+				t.Fatalf("register: %v", err)
+			}
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+			req.Header.Set("User-Agent", "abstp/1.0.0")
+			req.SetPathValue("session_id", sessionID)
+			req.SetPathValue("track_index", "0")
+			if tt.initialRange != "" {
+				req.Header.Set("Range", tt.initialRange)
+			}
+
+			rec := httptest.NewRecorder()
+			s.handleTrack(rec, req)
+
+			if rec.Body.String() != tt.firstPart+tt.secondPart {
+				t.Fatalf("expected combined %q, got %q", tt.firstPart+tt.secondPart, rec.Body.String())
+			}
+			if requestCount.Load() != 2 {
+				t.Fatalf("expected exactly 2 upstream requests, got %d", requestCount.Load())
+			}
+		})
 	}
 }
 
@@ -582,6 +621,7 @@ func TestServer_Proxy_Strict206ValidationOnResume(t *testing.T) {
 	var attempts atomic.Int32
 
 	s := New("http://example.com", "token", "1.0.0", true)
+	s.spoolBytes = 4
 	s.retryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -607,9 +647,10 @@ func TestServer_Proxy_Strict206ValidationOnResume(t *testing.T) {
 				return resp, nil
 			}
 			resp := &http.Response{
-				StatusCode: http.StatusPartialContent,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader(part2)),
+				StatusCode:    http.StatusPartialContent,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(part2)),
+				ContentLength: -1,
 			}
 			resp.Header.Set("Content-Type", "audio/mpeg")
 			return resp, nil
@@ -641,40 +682,69 @@ func TestServer_Proxy_Strict206ValidationOnResume(t *testing.T) {
 	}
 }
 
-func TestServer_Proxy_ChunkedTransfer_NoContentLength(t *testing.T) {
-	s := New("http://example.com", "token", "1.0.0", false)
-	s.httpClient = &http.Client{
-		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			resp := &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("chunked-audio-data")),
+func TestServer_Proxy_ContentLength_Forwarding(t *testing.T) {
+	tests := []struct {
+		name          string
+		headerCL      string
+		expectedCL    string
+		contentLength int64
+	}{
+		{
+			name:          "content length field present",
+			contentLength: 18,
+			headerCL:      "",
+			expectedCL:    "18",
+		},
+		{
+			name:          "content length header fallback",
+			contentLength: -1,
+			headerCL:      "25",
+			expectedCL:    "25",
+		},
+		{
+			name:          "no content length",
+			contentLength: -1,
+			headerCL:      "",
+			expectedCL:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New("http://example.com", "token", "1.0.0", false)
+			s.httpClient = &http.Client{
+				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					resp := &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(strings.NewReader("audio-payload-data")),
+						ContentLength: tt.contentLength,
+					}
+					resp.Header.Set("Content-Type", "audio/mpeg")
+					if tt.headerCL != "" {
+						resp.Header.Set("Content-Length", tt.headerCL)
+					}
+					return resp, nil
+				}),
 			}
-			resp.Header.Set("Content-Type", "audio/mpeg")
-			resp.Header.Set("Content-Length", "18")
-			resp.Header.Set("Accept-Ranges", "bytes")
-			return resp, nil
-		}),
-	}
 
-	sessionID := "sess-chunked"
-	token, err := s.RegisterSession(sessionID, []string{"/audio-chunked-transfer.mp3"})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
+			sessionID := "sess-cl"
+			token, err := s.RegisterSession(sessionID, []string{"/audio-cl.mp3"})
+			if err != nil {
+				t.Fatalf("register: %v", err)
+			}
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-	req.Header.Set("User-Agent", "abstp/1.0.0")
-	req.SetPathValue("session_id", sessionID)
-	req.SetPathValue("track_index", "0")
-	rec := httptest.NewRecorder()
-	s.handleTrack(rec, req)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+			req.Header.Set("User-Agent", "abstp/1.0.0")
+			req.SetPathValue("session_id", sessionID)
+			req.SetPathValue("track_index", "0")
+			rec := httptest.NewRecorder()
+			s.handleTrack(rec, req)
 
-	if cl := rec.Header().Get("Content-Length"); cl != "" {
-		t.Fatalf("expected no Content-Length header in forwarded response, got %s", cl)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "audio/mpeg" {
-		t.Fatalf("expected Content-Type audio/mpeg, got %s", ct)
+			if cl := rec.Header().Get("Content-Length"); cl != tt.expectedCL {
+				t.Fatalf("expected Content-Length %q, got %q", tt.expectedCL, cl)
+			}
+		})
 	}
 }
 
@@ -726,9 +796,10 @@ func TestServer_Proxy_UpstreamNetworkErrorRetry(t *testing.T) {
 				return nil, errors.New("temporary dial error")
 			}
 			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(strings.NewReader("success-after-retry")),
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("success-after-retry")),
+				ContentLength: -1,
 			}, nil
 		}),
 	}
@@ -782,6 +853,252 @@ func TestServer_Proxy_ContextCancelled(_ *testing.T) {
 	s.handleTrack(rec, req)
 }
 
+func TestReadSpool(t *testing.T) {
+	tests := []struct {
+		reader    io.Reader
+		name      string
+		spoolSize int
+		wantLen   int
+		wantEOF   bool
+		wantErr   bool
+	}{
+		{
+			name:      "eof before spool filled",
+			reader:    strings.NewReader("sp"),
+			spoolSize: 8,
+			wantLen:   2,
+			wantEOF:   true,
+		},
+		{
+			name:      "spool buffer filled",
+			reader:    strings.NewReader("spool-data-full"),
+			spoolSize: 8,
+			wantLen:   8,
+			wantEOF:   false,
+		},
+		{
+			name:      "empty reader",
+			reader:    strings.NewReader(""),
+			spoolSize: 8,
+			wantLen:   0,
+			wantEOF:   true,
+		},
+		{
+			name:      "empty read without error",
+			reader:    &emptyNoErrReader{},
+			spoolSize: 8,
+			wantErr:   true,
+		},
+		{
+			name:      "read error mid spool",
+			reader:    &errAfterReader{data: []byte("ab"), err: errors.New("spool drop")},
+			spoolSize: 8,
+			wantErr:   true,
+		},
+		{
+			name:      "invalid spool size",
+			reader:    strings.NewReader("x"),
+			spoolSize: 0,
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, eof, err := readSpool(tt.reader, tt.spoolSize)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error from readSpool")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected readSpool error: %v", err)
+			}
+			if len(got) != tt.wantLen || eof != tt.wantEOF {
+				t.Fatalf("readSpool = len %d, eof %v; want len %d, eof %v", len(got), eof, tt.wantLen, tt.wantEOF)
+			}
+		})
+	}
+}
+
+func TestServer_Proxy_EarlySpoolRetry(t *testing.T) {
+	tests := []struct {
+		firstBody io.ReadCloser
+		name      string
+		wantBody  string
+		firstCL   int64
+	}{
+		{
+			name:      "upstream error before spool fills",
+			firstBody: &errAfterReader{data: []byte("partial-prefix"), err: errors.New("early upstream drop")},
+			wantBody:  "complete-payload-here",
+		},
+		{
+			name:      "upstream eof before declared length",
+			firstCL:   100,
+			firstBody: io.NopCloser(strings.NewReader("short-payload")),
+			wantBody:  "final-payload-complete",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			s := New("http://example.com", "token", "test", true)
+			s.retryDelays = []time.Duration{time.Millisecond}
+			s.httpClient = &http.Client{
+				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					if requestCount.Add(1) == 1 {
+						resp := &http.Response{
+							StatusCode:    http.StatusOK,
+							Header:        make(http.Header),
+							Body:          tt.firstBody,
+							ContentLength: tt.firstCL,
+						}
+						resp.Header.Set("Content-Type", "audio/mpeg")
+						return resp, nil
+					}
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(strings.NewReader(tt.wantBody)),
+						ContentLength: -1,
+					}, nil
+				}),
+			}
+
+			sessionID := "sess-early-spool"
+			token, err := s.RegisterSession(sessionID, []string{"/early-spool.mp3"})
+			if err != nil {
+				t.Fatalf("register session: %v", err)
+			}
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+			req.Header.Set("User-Agent", "abstp/1.0.0")
+			req.SetPathValue("session_id", sessionID)
+			req.SetPathValue("track_index", "0")
+
+			rec := httptest.NewRecorder()
+			s.handleTrack(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status 200, got %d", rec.Code)
+			}
+			if rec.Body.String() != tt.wantBody {
+				t.Fatalf("expected body %q without partial spill, got %q", tt.wantBody, rec.Body.String())
+			}
+			if requestCount.Load() != 2 {
+				t.Fatalf("expected 2 upstream requests after early spool failure, got %d", requestCount.Load())
+			}
+		})
+	}
+}
+
+func TestServer_Proxy_MidStreamEOFDropRetry(t *testing.T) {
+	var requestCount atomic.Int32
+	s := New("http://example.com", "token", "test", true)
+	s.spoolBytes = 2
+	s.retryDelays = []time.Duration{time.Millisecond}
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if requestCount.Add(1) == 1 {
+				if rangeHdr := req.Header.Get("Range"); rangeHdr != "" {
+					t.Errorf("expected no Range on first attempt, got %q", rangeHdr)
+				}
+				resp := &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader("abcde")),
+					ContentLength: 10,
+				}
+				resp.Header.Set("Content-Type", "audio/mpeg")
+				return resp, nil
+			}
+			if rangeHdr := req.Header.Get("Range"); rangeHdr != "bytes=5-" {
+				t.Errorf("expected Range bytes=5- on resume, got %q", rangeHdr)
+			}
+			resp := &http.Response{
+				StatusCode:    http.StatusPartialContent,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("fghij")),
+				ContentLength: 5,
+			}
+			resp.Header.Set("Content-Type", "audio/mpeg")
+			return resp, nil
+		}),
+	}
+
+	sessionID := "sess-mid-eof"
+	token, err := s.RegisterSession(sessionID, []string{"/mid-eof.mp3"})
+	if err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "abcdefghij" {
+		t.Fatalf("expected valid combined body, got %q", rec.Body.String())
+	}
+	if requestCount.Load() != 2 {
+		t.Fatalf("expected 2 upstream requests after mid-stream EOF drop, got %d", requestCount.Load())
+	}
+}
+
+func TestServer_Proxy_RetryExhaustAfterCommit(t *testing.T) {
+	var requestCount atomic.Int32
+	s := New("http://example.com", "token", "test", false)
+	s.spoolBytes = 2
+	s.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			status := http.StatusOK
+			if requestCount.Load() > 0 {
+				status = http.StatusPartialContent
+			}
+			requestCount.Add(1)
+			resp := &http.Response{
+				StatusCode:    status,
+				Header:        make(http.Header),
+				Body:          &errAfterReader{data: []byte("abcdef"), err: errors.New("repeated drop")},
+				ContentLength: -1,
+			}
+			resp.Header.Set("Content-Type", "audio/mpeg")
+			return resp, nil
+		}),
+	}
+
+	sessionID := "sess-exhaust-commit"
+	token, err := s.RegisterSession(sessionID, []string{"/exhaust-commit.mp3"})
+	if err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected committed status 200, got %d", rec.Code)
+	}
+	if int(requestCount.Load()) != len(s.retryDelays)+1 {
+		t.Fatalf("expected %d attempts after commit, got %d", len(s.retryDelays)+1, requestCount.Load())
+	}
+}
+
 type errWriter struct {
 	header http.Header
 }
@@ -804,7 +1121,7 @@ func TestServer_Proxy_ClientWriteError(t *testing.T) {
 	var bytesWritten int64
 	ew := &errWriter{}
 
-	completed, err := streamResponseBody(ew, body, nil, &bytesWritten, nil)
+	completed, err := streamResponseBody(ew, body, nil, &bytesWritten, nil, -1)
 	if err == nil {
 		t.Fatal("expected client write error")
 	}
@@ -849,6 +1166,24 @@ func TestParseRange(t *testing.T) {
 			wantStart: 200,
 			wantEnd:   "500",
 			wantHas:   true,
+		},
+		{
+			input:     "bytes=-500",
+			wantStart: 0,
+			wantEnd:   "",
+			wantHas:   true,
+		},
+		{
+			input:     "bytes=-not-a-number",
+			wantStart: 0,
+			wantEnd:   "",
+			wantHas:   false,
+		},
+		{
+			input:     "bytes=12345",
+			wantStart: 0,
+			wantEnd:   "",
+			wantHas:   false,
 		},
 	}
 
@@ -1158,9 +1493,10 @@ func TestExecuteAttempt_BodyCloseError(t *testing.T) {
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       &mockErrCloseBody{Reader: strings.NewReader("sample audio data")},
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          &mockErrCloseBody{Reader: strings.NewReader("sample audio data")},
+				ContentLength: -1,
 			}, nil
 		}),
 	}
@@ -1174,5 +1510,51 @@ func TestExecuteAttempt_BodyCloseError(t *testing.T) {
 	ok, err := s.executeAttempt(rec, req, "http://close.example.org/audio.mp3", rangeHeader{}, rec, &bytesWritten, &headersSent, &lastActivity)
 	if !ok || err != nil {
 		t.Errorf("expected ok=true err=nil, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestExecuteAttempt_CommitWriteError(t *testing.T) {
+	tests := []struct {
+		body      string
+		spoolSize int
+	}{
+		{
+			spoolSize: 8,
+			body:      "abc",
+		},
+		{
+			spoolSize: 4,
+			body:      "longer-payload",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.body, func(t *testing.T) {
+			s := New("http://commit.example.com", "token", "1.0", false)
+			s.spoolBytes = tt.spoolSize
+			s.httpClient = &http.Client{
+				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(strings.NewReader(tt.body)),
+						ContentLength: -1,
+					}, nil
+				}),
+			}
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/sess/0", http.NoBody)
+			var bytesWritten int64
+			var headersSent bool
+			var lastActivity atomic.Int64
+
+			ok, err := s.executeAttempt(&errWriter{}, req, "http://commit.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
+			if ok {
+				t.Error("expected ok=false")
+			}
+			if err == nil {
+				t.Error("expected write error")
+			}
+		})
 	}
 }

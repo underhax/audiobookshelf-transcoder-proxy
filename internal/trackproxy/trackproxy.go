@@ -269,7 +269,8 @@ func (s *Server) resolveUpstreamURL(trackContentURL string) (string, error) {
 }
 
 func (s *Server) getActiveSession(r *http.Request, sessionID string) (state *sessionState, statusCode int, errMsg string) {
-	if !strings.HasPrefix(r.UserAgent(), "abstp") {
+	ua := r.UserAgent()
+	if !strings.HasPrefix(ua, "abstp") && !strings.HasPrefix(ua, "Lavf") {
 		return nil, http.StatusForbidden, "forbidden"
 	}
 

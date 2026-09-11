@@ -39,7 +39,6 @@ func BuildArgs(params *Params) []string {
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
-		"-user_agent", userAgent,
 		"-rw_timeout", "60000000",
 		"-probesize", "32768",
 		"-analyzeduration", "100000",
@@ -51,6 +50,8 @@ func BuildArgs(params *Params) []string {
 			"-safe", "0",
 			"-protocol_whitelist", "file,http,https,tcp,tls",
 		)
+	} else {
+		args = append(args, "-user_agent", userAgent)
 	}
 
 	if params.SeekOffset > 0 {

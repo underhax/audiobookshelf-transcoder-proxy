@@ -44,8 +44,8 @@ func TestBuildArgs(t *testing.T) {
 				SeekOffset: 120.5,
 				IsConcat:   true,
 			},
-			wantSubstr: []string{"-user_agent", "abstp", "-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-ss", "120.50", "-filter:a", "atempo=1.75"},
-			notSubstr:  []string{"-headers"},
+			wantSubstr: []string{"-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-ss", "120.50", "-filter:a", "atempo=1.75"},
+			notSubstr:  []string{"-headers", "-user_agent"},
 		},
 	}
 

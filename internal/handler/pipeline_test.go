@@ -270,15 +270,16 @@ func TestTerminateProcess(t *testing.T) {
 
 	cmdNil := exec.CommandContext(ctx, "echo", "test")
 	closerErr := &testCloser{err: errors.New("close failure")}
-	terminateProcess("sess-term-nil", closerErr, cmdNil)
+	terminateProcess("sess-term-nil", closerErr, cmdNil, nil)
 
 	cmdRun := exec.CommandContext(ctx, "sleep", "5")
 	if err := cmdRun.Start(); err != nil {
 		t.Fatalf("start sleep error: %v", err)
 	}
 	closerOk := &testCloser{err: nil}
-	terminateProcess("sess-term-run", closerOk, cmdRun)
-	terminateProcess("sess-term-cmd-nil", closerOk, nil)
+	buf := bytes.NewBufferString("sample ffmpeg error output\n")
+	terminateProcess("sess-term-run", closerOk, cmdRun, buf)
+	terminateProcess("sess-term-cmd-nil", closerOk, nil, nil)
 }
 
 func TestTerminateProcess_ProcessKillError(t *testing.T) {
@@ -299,13 +300,34 @@ func TestTerminateProcess_ProcessKillError(t *testing.T) {
 		t.Fatalf("run true: %v", err)
 	}
 	closer := &testCloser{}
-	terminateProcess("sess-term-kill-err", closer, cmd)
+	terminateProcess("sess-term-kill-err", closer, cmd, nil)
 
 	if cmd.Process != nil {
 		if err := defaultProcessKill(cmd.Process); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			t.Logf("default process kill error: %v", err)
 		}
 	}
+}
+
+func TestLogProcessExit(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	cmdClean := exec.CommandContext(ctx, "true")
+	if err := cmdClean.Start(); err != nil {
+		t.Fatalf("start true: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	logProcessExit("sess-clean", cmdClean, nil)
+
+	cmdErr := exec.CommandContext(ctx, "false")
+	if err := cmdErr.Start(); err != nil {
+		t.Fatalf("start false: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	bufErr := bytes.NewBufferString("something went wrong\n")
+	logProcessExit("sess-err", cmdErr, bufErr)
 }
 
 func TestCalculateCurrentPosition(t *testing.T) {

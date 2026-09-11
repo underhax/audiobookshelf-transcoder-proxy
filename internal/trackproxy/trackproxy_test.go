@@ -125,6 +125,11 @@ func TestServer_UserAgent_Whitelist(t *testing.T) {
 			userAgent:      "abstp/1.0.0",
 			expectedStatus: http.StatusNotFound,
 		},
+		{
+			name:           "valid lavf user agent allowed past whitelist",
+			userAgent:      "Lavf/60.16.100",
+			expectedStatus: http.StatusNotFound,
+		},
 	}
 
 	for _, tt := range tests {

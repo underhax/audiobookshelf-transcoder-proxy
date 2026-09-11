@@ -320,7 +320,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.Cmd = cmd
-	defer terminateProcess(sessionID, stdout, cmd)
+	defer terminateProcess(sessionID, stdout, cmd, stderrBuf)
 
 	w.Header().Set("Transfer-Encoding", "chunked")
 	w.WriteHeader(http.StatusOK)
@@ -419,7 +419,7 @@ func callProcessKill(p *os.Process) error {
 	return fn(p)
 }
 
-func terminateProcess(sessionID string, stdout io.Closer, cmd *exec.Cmd) {
+func terminateProcess(sessionID string, stdout io.Closer, cmd *exec.Cmd, stderrBuf *bytes.Buffer) {
 	if closeErr := stdout.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
 		log.Println(strings.ReplaceAll(fmt.Sprintf("close stdout error for session %s: %v", sessionID, closeErr), "\n", " "))
 	}
@@ -431,11 +431,18 @@ func terminateProcess(sessionID string, stdout io.Closer, cmd *exec.Cmd) {
 			log.Println(strings.ReplaceAll(fmt.Sprintf("kill process error for session %s: %v", sessionID, killErr), "\n", " "))
 		}
 	}
-	logProcessExit(sessionID, cmd)
+	logProcessExit(sessionID, cmd, stderrBuf)
 }
 
-func logProcessExit(sessionID string, cmd *exec.Cmd) {
+func logProcessExit(sessionID string, cmd *exec.Cmd, stderrBuf *bytes.Buffer) {
 	waitErr := cmd.Wait()
+	var stderrOutput string
+	if stderrBuf != nil && stderrBuf.Len() > 0 {
+		cleaned := strings.ReplaceAll(strings.TrimSpace(stderrBuf.String()), "\n", " | ")
+		if cleaned != "" {
+			stderrOutput = "; stderr: " + cleaned
+		}
+	}
 	if waitErr == nil {
 		if cmd.ProcessState != nil {
 			log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited cleanly with code %d", sessionID, cmd.ProcessState.ExitCode()), "\n", " "))
@@ -446,10 +453,10 @@ func logProcessExit(sessionID string, cmd *exec.Cmd) {
 		return
 	}
 	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited with code %d: %v", sessionID, exitErr.ExitCode(), exitErr), "\n", " "))
+		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited with code %d: %v%s", sessionID, exitErr.ExitCode(), exitErr, stderrOutput), "\n", " "))
 		return
 	}
-	log.Println(strings.ReplaceAll(fmt.Sprintf("wait ffmpeg process error for session %s: %v", sessionID, waitErr), "\n", " "))
+	log.Println(strings.ReplaceAll(fmt.Sprintf("wait ffmpeg process error for session %s: %v%s", sessionID, waitErr, stderrOutput), "\n", " "))
 }
 
 func (h *Handler) startKeepalive(ctx context.Context, rw *ratelimit.Writer, sess *session.Session, writeMu *sync.Mutex) context.CancelFunc {

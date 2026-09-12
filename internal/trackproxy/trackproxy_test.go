@@ -55,6 +55,15 @@ func (b *blockingReader) Read(_ []byte) (int, error) {
 	return 0, io.EOF
 }
 
+type contextBlockingReader struct {
+	ctx context.Context
+}
+
+func (c *contextBlockingReader) Read(_ []byte) (int, error) {
+	<-c.ctx.Done()
+	return 0, c.ctx.Err()
+}
+
 func TestServer_Lifecycle(t *testing.T) {
 	s := New("http://example.com", "secret-token", "1.0.0", false)
 	port, err := s.Start()
@@ -388,6 +397,71 @@ func TestServer_Concurrency_Limit(t *testing.T) {
 
 	if rec2.Code != http.StatusConflict {
 		t.Fatalf("expected status 409 Conflict for concurrent stream, got %d", rec2.Code)
+	}
+}
+
+func TestServer_Concurrency_Takeover(t *testing.T) {
+	s := New("http://takeover.example.com", "token", "1.0.0", false)
+	var calls atomic.Int32
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(&contextBlockingReader{ctx: req.Context()}),
+					ContentLength: -1,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("second-response")),
+				ContentLength: -1,
+			}, nil
+		}),
+	}
+
+	sessionID := "sess-takeover"
+	token, err := s.RegisterSession(sessionID, []string{"/audio-takeover-stream.mp3"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	started := make(chan struct{})
+	req1Done := make(chan struct{})
+	go func() {
+		req1 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+		req1.Header.Set("User-Agent", "abstp/1.0.0")
+		req1.SetPathValue("session_id", sessionID)
+		req1.SetPathValue("track_index", "0")
+		rec1 := httptest.NewRecorder()
+		close(started)
+		s.handleTrack(rec1, req1)
+		close(req1Done)
+	}()
+
+	<-started
+	time.Sleep(50 * time.Millisecond)
+
+	req2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req2.Header.Set("User-Agent", "abstp/1.0.0")
+	req2.SetPathValue("session_id", sessionID)
+	req2.SetPathValue("track_index", "0")
+	rec2 := httptest.NewRecorder()
+	s.handleTrack(rec2, req2)
+
+	select {
+	case <-req1Done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale stream was not canceled by takeover")
+	}
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for takeover request, got %d", rec2.Code)
+	}
+	if rec2.Body.String() != "second-response" {
+		t.Fatalf("expected takeover response body, got %q", rec2.Body.String())
 	}
 }
 
@@ -1482,7 +1556,7 @@ func TestExecuteAttempt_NewRequestError(t *testing.T) {
 	var headersSent bool
 	var lastActivity atomic.Int64
 
-	ok, err := s.executeAttempt(rec, req, ":", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
+	ok, err := s.executeAttempt(req.Context(), rec, ":", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
 	if ok || err != nil {
 		t.Errorf("expected false, nil on bad upstream URL, got ok=%v err=%v", ok, err)
 	}
@@ -1507,7 +1581,7 @@ func TestExecuteAttempt_BodyCloseError(t *testing.T) {
 	var headersSent bool
 	var lastActivity atomic.Int64
 
-	ok, err := s.executeAttempt(rec, req, "http://close.example.org/audio.mp3", rangeHeader{}, rec, &bytesWritten, &headersSent, &lastActivity)
+	ok, err := s.executeAttempt(req.Context(), rec, "http://close.example.org/audio.mp3", rangeHeader{}, rec, &bytesWritten, &headersSent, &lastActivity)
 	if !ok || err != nil {
 		t.Errorf("expected ok=true err=nil, got ok=%v err=%v", ok, err)
 	}
@@ -1548,7 +1622,7 @@ func TestExecuteAttempt_CommitWriteError(t *testing.T) {
 			var headersSent bool
 			var lastActivity atomic.Int64
 
-			ok, err := s.executeAttempt(&errWriter{}, req, "http://commit.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
+			ok, err := s.executeAttempt(req.Context(), &errWriter{}, "http://commit.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
 			if ok {
 				t.Error("expected ok=false")
 			}

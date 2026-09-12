@@ -27,11 +27,17 @@ const sessionIdleTimeout = 45 * time.Second
 const streamAcquireTimeout = 2 * time.Second
 const defaultSpoolBytes = 256 * 1024
 
+type streamOwner struct {
+	cancel context.CancelFunc
+}
+
 type sessionState struct {
 	sem          chan struct{}
+	owner        *streamOwner
 	token        string
 	trackURLs    []string
 	lastActivity atomic.Int64
+	mu           sync.Mutex
 }
 
 // Server coordinates the internal loopback HTTP listener and upstream Audiobookshelf audio proxying.
@@ -323,6 +329,38 @@ func acquireStream(ctx context.Context, sem chan struct{}) bool {
 	}
 }
 
+func tryAcquireStream(sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (st *sessionState) cancelActive() {
+	st.mu.Lock()
+	owner := st.owner
+	st.mu.Unlock()
+	if owner != nil {
+		owner.cancel()
+	}
+}
+
+func (st *sessionState) setActiveOwner(owner *streamOwner) {
+	st.mu.Lock()
+	st.owner = owner
+	st.mu.Unlock()
+}
+
+func (st *sessionState) clearActiveOwner(owner *streamOwner) {
+	st.mu.Lock()
+	if st.owner == owner {
+		st.owner = nil
+	}
+	st.mu.Unlock()
+}
+
 func (s *Server) resolveTrack(trackURLs []string, trackIdxStr string) (upstreamURL string, statusCode int, errMsg string) {
 	idx, err := strconv.Atoi(trackIdxStr)
 	if err != nil || idx < 0 || idx >= len(trackURLs) {
@@ -362,14 +400,25 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !acquireStream(r.Context(), state.sem) {
-		if r.Context().Err() != nil {
+	streamCtx, streamCancel := context.WithCancel(r.Context())
+	if !tryAcquireStream(state.sem) {
+		state.cancelActive()
+		if !acquireStream(r.Context(), state.sem) {
+			streamCancel()
+			if r.Context().Err() != nil {
+				return
+			}
+			http.Error(w, `{"error":"session stream already in use"}`, http.StatusConflict)
 			return
 		}
-		http.Error(w, `{"error":"session stream already in use"}`, http.StatusConflict)
-		return
 	}
-	defer func() { <-state.sem }()
+	owner := &streamOwner{cancel: streamCancel}
+	state.setActiveOwner(owner)
+	defer func() {
+		state.clearActiveOwner(owner)
+		streamCancel()
+		<-state.sem
+	}()
 
 	upstreamURL, status, errMsg := s.resolveTrack(state.trackURLs, trackIdxStr)
 	if status != 0 {
@@ -378,7 +427,7 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	initRange := parseRange(r.Header.Get("Range"))
-	s.proxyWithRetry(w, r, upstreamURL, initRange, &state.lastActivity)
+	s.proxyWithRetry(streamCtx, w, r, upstreamURL, initRange, &state.lastActivity)
 }
 
 func (s *Server) newUpstreamRequest(ctx context.Context, targetURL string, currentStart int64, initRange rangeHeader, hasBytes bool) (*http.Request, error) {
@@ -423,13 +472,13 @@ func (s *Server) newUpstreamRequest(ctx context.Context, targetURL string, curre
 	return req, nil
 }
 
-func (s *Server) executeAttempt(w http.ResponseWriter, r *http.Request, upstreamURL string, initRange rangeHeader, flusher http.Flusher, bytesWritten *int64, headersSent *bool, lastActivity *atomic.Int64) (bool, error) {
+func (s *Server) executeAttempt(streamCtx context.Context, w http.ResponseWriter, upstreamURL string, initRange rangeHeader, flusher http.Flusher, bytesWritten *int64, headersSent *bool, lastActivity *atomic.Int64) (bool, error) {
 	currentStart := initRange.start + *bytesWritten
 	if s.debug && *bytesWritten > 0 {
 		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: resuming upstream stream from byte offset %d", currentStart), "\n", " "), "\r", ""))
 	}
 
-	req, err := s.newUpstreamRequest(r.Context(), upstreamURL, currentStart, initRange, *bytesWritten > 0)
+	req, err := s.newUpstreamRequest(streamCtx, upstreamURL, currentStart, initRange, *bytesWritten > 0)
 	if err != nil {
 		return false, nil
 	}
@@ -503,7 +552,7 @@ func (s *Server) commitInitialHeaders(w http.ResponseWriter, resp *http.Response
 	return true, false, nil
 }
 
-func (s *Server) proxyWithRetry(w http.ResponseWriter, r *http.Request, upstreamURL string, initRange rangeHeader, lastActivity *atomic.Int64) {
+func (s *Server) proxyWithRetry(streamCtx context.Context, w http.ResponseWriter, r *http.Request, upstreamURL string, initRange rangeHeader, lastActivity *atomic.Int64) {
 	var flusher http.Flusher
 	if f, ok := w.(http.Flusher); ok {
 		flusher = f
@@ -522,11 +571,13 @@ func (s *Server) proxyWithRetry(w http.ResponseWriter, r *http.Request, upstream
 			select {
 			case <-r.Context().Done():
 				return
+			case <-streamCtx.Done():
+				return
 			case <-time.After(delay):
 			}
 		}
 
-		completed, clientErr := s.executeAttempt(w, r, upstreamURL, initRange, flusher, &bytesWritten, &headersSent, lastActivity)
+		completed, clientErr := s.executeAttempt(streamCtx, w, upstreamURL, initRange, flusher, &bytesWritten, &headersSent, lastActivity)
 		if clientErr != nil || completed {
 			return
 		}

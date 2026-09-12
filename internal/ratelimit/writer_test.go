@@ -85,7 +85,7 @@ func TestWriter_ThrottleWithSmallInterval(t *testing.T) {
 	t.Parallel()
 
 	mw := &mockFlushWriter{}
-	w := NewWriter(context.Background(), mw, 10, 10000)
+	w := NewWriter(context.Background(), mw, 10, 200)
 
 	data := make([]byte, 30)
 	start := time.Now()
@@ -111,6 +111,31 @@ func TestWriter_ThrottleWithSmallInterval(t *testing.T) {
 	}
 	if n2 != 4 {
 		t.Errorf("expected 4 bytes, got %d", n2)
+	}
+}
+
+func TestWriter_PauseBurstReplenishment(t *testing.T) {
+	t.Parallel()
+
+	mw := &mockFlushWriter{}
+	w := NewWriter(context.Background(), mw, 50, 1000)
+
+	initial := make([]byte, 50)
+	if _, err := w.Write(initial); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	second := make([]byte, 50)
+	start := time.Now()
+	if _, err := w.Write(second); err != nil {
+		t.Fatal(err)
+	}
+	duration := time.Since(start)
+
+	if duration > 30*time.Millisecond {
+		t.Errorf("expected burst write after pause, but took %v", duration)
 	}
 }
 
@@ -176,7 +201,7 @@ func TestWriter_ThrottleFallbackChunkSize(t *testing.T) {
 	t.Parallel()
 
 	mw := &mockFlushWriter{}
-	w := NewWriter(context.Background(), mw, 0, 1)
+	w := NewWriter(context.Background(), mw, 0, 1000)
 
 	n, err := w.Write([]byte("test"))
 	if err != nil {
@@ -184,5 +209,18 @@ func TestWriter_ThrottleFallbackChunkSize(t *testing.T) {
 	}
 	if n != 4 {
 		t.Errorf("expected 4 bytes written, got %d", n)
+	}
+}
+
+func TestWriter_WaitDeficitZero(t *testing.T) {
+	t.Parallel()
+
+	mw := &mockFlushWriter{}
+	w := NewWriter(context.Background(), mw, 10, 100)
+	w.mu.Lock()
+	err := w.waitDeficit(0)
+	w.mu.Unlock()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

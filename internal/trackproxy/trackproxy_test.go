@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1187,37 +1188,39 @@ func (e *errWriter) Write(_ []byte) (int, error) {
 func (e *errWriter) WriteHeader(_ int) {}
 
 func TestServer_Proxy_ClientWriteError(t *testing.T) {
-	body := strings.NewReader("payload data that cannot be written")
+	t.Parallel()
+
+	s := New("http://example.com", "token", "1.0", false)
+	buf := newReadAheadBuffer(1024)
+	if _, err := buf.Write([]byte("payload data that cannot be written")); err != nil {
+		t.Fatal(err)
+	}
 	var bytesWritten int64
 	ew := &errWriter{}
 
-	completed, err := streamResponseBody(ew, body, nil, &bytesWritten, nil, -1, false)
+	err := s.streamFromBuffer(context.Background(), ew, buf, nil, &bytesWritten, nil)
 	if err == nil {
 		t.Fatal("expected client write error")
 	}
-	if completed {
-		t.Fatal("expected stream not completed")
-	}
 }
 
-func TestStreamResponseBody_ProgressLog(t *testing.T) {
-	var lastActivity atomic.Int64
-	payload := strings.Repeat("p", 3*1024*1024)
-	rw := httptest.NewRecorder()
-	var bytesWritten int64
+func TestPumpBodyToBuffer_ProgressLog(t *testing.T) {
+	t.Parallel()
 
-	completed, err := streamResponseBody(rw, strings.NewReader(payload), nil, &bytesWritten, &lastActivity, int64(len(payload)), true)
+	s := New("http://example.com", "token", "1.0", true)
+	payload := strings.Repeat("p", 2*1024*1024)
+	buf := newReadAheadBuffer(3 * 1024 * 1024)
+	var bytesFetched int64
+
+	completed, err := s.pumpBodyToBuffer(context.Background(), buf, strings.NewReader(payload), &bytesFetched, int64(len(payload)))
 	if err != nil {
-		t.Fatalf("stream response body: %v", err)
+		t.Fatalf("pump body to buffer: %v", err)
 	}
 	if !completed {
 		t.Fatal("expected stream completed")
 	}
-	if bytesWritten != int64(len(payload)) {
-		t.Fatalf("expected %d bytes written, got %d", len(payload), bytesWritten)
-	}
-	if rw.Body.Len() != len(payload) {
-		t.Fatalf("expected %d bytes in recorder body, got %d", len(payload), rw.Body.Len())
+	if bytesFetched != int64(len(payload)) {
+		t.Fatalf("expected %d bytes fetched, got %d", len(payload), bytesFetched)
 	}
 }
 
@@ -1544,46 +1547,31 @@ func TestNewUpstreamRequest_Errors(t *testing.T) {
 	}
 }
 
-func TestExecuteAttempt_NewRequestError(t *testing.T) {
+func TestRequestInitial_NewRequestError(t *testing.T) {
+	t.Parallel()
+
 	s := New("http://attempt.example.net", "token", "1.0", false)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/sess/0", http.NoBody)
-	var bytesWritten int64
-	var headersSent bool
-	var lastActivity atomic.Int64
-
-	ok, err := s.executeAttempt(req.Context(), rec, ":", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
-	if ok || err != nil {
-		t.Errorf("expected false, nil on bad upstream URL, got ok=%v err=%v", ok, err)
+	resp, err := s.requestInitial(context.Background(), ":", rangeHeader{}, false)
+	if resp != nil {
+		defer func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				t.Logf("close body: %v", closeErr)
+			}
+		}()
+	}
+	if resp != nil || err == nil {
+		t.Errorf("expected nil, error on bad upstream URL, got resp=%v err=%v", resp, err)
 	}
 }
 
-func TestExecuteAttempt_BodyCloseError(t *testing.T) {
-	s := New("http://close.example.org", "token", "1.0", false)
-	s.httpClient = &http.Client{
-		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode:    http.StatusOK,
-				Header:        make(http.Header),
-				Body:          &mockErrCloseBody{Reader: strings.NewReader("sample audio data")},
-				ContentLength: -1,
-			}, nil
-		}),
-	}
+func TestCloseBody(t *testing.T) {
+	t.Parallel()
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/sess/0", http.NoBody)
-	var bytesWritten int64
-	var headersSent bool
-	var lastActivity atomic.Int64
-
-	ok, err := s.executeAttempt(req.Context(), rec, "http://close.example.org/audio.mp3", rangeHeader{}, rec, &bytesWritten, &headersSent, &lastActivity)
-	if !ok || err != nil {
-		t.Errorf("expected ok=true err=nil, got ok=%v err=%v", ok, err)
-	}
+	closeBody(&mockErrCloseBody{Reader: strings.NewReader("sample audio data")})
+	closeBody(io.NopCloser(strings.NewReader("sample audio data")))
 }
 
-func TestExecuteAttempt_CommitWriteError(t *testing.T) {
+func TestConnectInitial_CommitWriteError(t *testing.T) {
 	tests := []struct {
 		body      string
 		spoolSize int
@@ -1618,9 +1606,13 @@ func TestExecuteAttempt_CommitWriteError(t *testing.T) {
 			var headersSent bool
 			var lastActivity atomic.Int64
 
-			ok, err := s.executeAttempt(req.Context(), &errWriter{}, "http://commit.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
-			if ok {
-				t.Error("expected ok=false")
+			body, _, completed, err := s.connectInitial(req.Context(), &errWriter{}, "http://commit.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
+			if body != nil {
+				closeBody(body)
+				t.Error("expected body=nil")
+			}
+			if completed {
+				t.Error("expected completed=false")
 			}
 			if err == nil {
 				t.Error("expected write error")
@@ -1689,4 +1681,267 @@ func TestServer_Proxy_RetryResetAfterHealthy(t *testing.T) {
 	if attempts.Load() != 4 {
 		t.Fatalf("expected 4 attempts (2 healthy resets + 2 exhausted failures), got %d", attempts.Load())
 	}
+}
+
+func TestServer_Proxy_ReadAheadBufferDecoupledResume(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	firstPart := strings.Repeat("m", 4096)
+	secondPart := strings.Repeat("n", 4096)
+
+	s := New("http://decoupled.example.org", "token", "test", true)
+	s.spoolBytes = 128
+	s.retryDelays = []time.Duration{time.Millisecond}
+
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			att := attempts.Add(1)
+			if att == 1 {
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body: &errAfterReader{
+						data: []byte(firstPart),
+						err:  errors.New("tcp drop during prebuffering"),
+					},
+					ContentLength: -1,
+				}
+				resp.Header.Set("Content-Type", "audio/mpeg")
+				return resp, nil
+			}
+
+			if req.Header.Get("Range") != fmt.Sprintf("bytes=%d-", len(firstPart)) {
+				t.Errorf("expected Range bytes=%d-, got %q", len(firstPart), req.Header.Get("Range"))
+			}
+
+			resp := &http.Response{
+				StatusCode:    http.StatusPartialContent,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(secondPart)),
+				ContentLength: -1,
+			}
+			resp.Header.Set("Content-Type", "audio/mpeg")
+			return resp, nil
+		}),
+	}
+
+	sessionID := "sess-decoupled"
+	token, err := s.RegisterSession(sessionID, []string{"/decoupled.mp3"})
+	if err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	expected := firstPart + secondPart
+	if rec.Body.String() != expected {
+		t.Fatalf("expected %d bytes, got %d", len(expected), rec.Body.Len())
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts.Load())
+	}
+}
+
+func TestServer_HandleRetryFailure_Debug(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://retry.example.org", "token", "1.0", true)
+	failures := len(s.retryDelays)
+	if s.handleRetryFailure(context.Background(), &failures, 100) {
+		t.Error("expected false when max retries exceeded")
+	}
+}
+
+type mockErrReader struct{}
+
+func (m *mockErrReader) Read(_ []byte) (int, error) {
+	return 0, errors.New("read spool failure")
+}
+
+func TestConnectInitial_SpoolReadError(t *testing.T) {
+	tests := []struct {
+		name      string
+		delays    []time.Duration
+		cancelCtx bool
+		expectErr bool
+	}{
+		{
+			name:      "exhausted",
+			delays:    nil,
+			cancelCtx: false,
+			expectErr: false,
+		},
+		{
+			name:      "cancelled",
+			delays:    []time.Duration{time.Second},
+			cancelCtx: true,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New("http://spool.example.com", "token", "1.0", false)
+			s.retryDelays = tt.delays
+			s.httpClient = &http.Client{
+				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        make(http.Header),
+						Body:          io.NopCloser(&mockErrReader{}),
+						ContentLength: 100,
+					}, nil
+				}),
+			}
+
+			ctx := context.Background()
+			if tt.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/track/sess/0", http.NoBody)
+			var bytesWritten int64
+			var headersSent bool
+			var lastActivity atomic.Int64
+
+			body, _, completed, err := s.connectInitial(req.Context(), httptest.NewRecorder(), "http://spool.example.com/audio.mp3", rangeHeader{}, nil, &bytesWritten, &headersSent, &lastActivity)
+			if body != nil {
+				closeBody(body)
+			}
+			if body != nil || completed {
+				t.Errorf("expected body=nil completed=false, got body=%v completed=%v", body, completed)
+			}
+			if tt.expectErr && err == nil {
+				t.Error("expected error")
+			}
+			if !tt.expectErr && err != nil {
+				t.Errorf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestPumpBodyToBuffer_Cancelled(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://pump.example.org", "token", "1.0", false)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	buf := newReadAheadBuffer(1024)
+	var bytesFetched int64
+	completed, err := s.pumpBodyToBuffer(ctx, buf, strings.NewReader("data"), &bytesFetched, 4)
+	if completed || err == nil {
+		t.Errorf("expected completed=false err!=nil, got completed=%v err=%v", completed, err)
+	}
+}
+
+func TestPumpBodyToBuffer_BufferWriteError(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://pump.example.org", "token", "1.0", false)
+	buf := newReadAheadBuffer(1024)
+	buf.CloseWithError(errors.New("buffer closed"))
+
+	var bytesFetched int64
+	completed, err := s.pumpBodyToBuffer(context.Background(), buf, strings.NewReader("data"), &bytesFetched, 4)
+	if completed || err == nil {
+		t.Errorf("expected completed=false err!=nil, got completed=%v err=%v", completed, err)
+	}
+}
+
+func TestServer_ResumeUpstream_NewRequestError(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://resume.example.org", "token", "1.0", false)
+	body, _, err := s.resumeUpstream(context.Background(), ":", rangeHeader{}, 100)
+	if body != nil {
+		closeBody(body)
+	}
+	if body != nil || err == nil {
+		t.Errorf("expected error on invalid URL, got body=%v err=%v", body, err)
+	}
+}
+
+func TestPumpStream_BufferClosed(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://pump.example.org", "token", "1.0", false)
+	buf := newReadAheadBuffer(1024)
+	buf.CloseWithError(errBufferClosed)
+
+	var bytesFetched int64
+	failures := 0
+	done := s.pumpStream(context.Background(), buf, io.NopCloser(strings.NewReader("payload")), 7, &bytesFetched, time.Now(), &failures)
+	if !done {
+		t.Error("expected done=true when buffer is closed")
+	}
+}
+
+func TestStreamFromBuffer_Cancelled(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://stream.example.org", "token", "1.0", false)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	buf := newReadAheadBuffer(1024)
+	var bytesWritten int64
+	err := s.streamFromBuffer(ctx, httptest.NewRecorder(), buf, nil, &bytesWritten, nil)
+	if err == nil {
+		t.Error("expected error on cancelled context")
+	}
+}
+
+type mockErrAfterWriter struct {
+	header http.Header
+	calls  atomic.Int32
+}
+
+func (m *mockErrAfterWriter) Header() http.Header {
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
+	return m.header
+}
+
+func (m *mockErrAfterWriter) Write(p []byte) (int, error) {
+	if m.calls.Add(1) > 1 {
+		return 0, errors.New("stream error after spool")
+	}
+	return len(p), nil
+}
+
+func (m *mockErrAfterWriter) WriteHeader(_ int) {}
+
+func TestServer_Proxy_StreamErrorDebug(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://debug.example.org", "token", "1.0", true)
+	s.spoolBytes = 4
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("sample payload data for testing")),
+				ContentLength: -1,
+			}, nil
+		}),
+	}
+
+	w := &mockErrAfterWriter{}
+	var lastActivity atomic.Int64
+	s.proxyWithRetry(context.Background(), w, "http://debug.example.org/audio.mp3", rangeHeader{}, &lastActivity)
 }

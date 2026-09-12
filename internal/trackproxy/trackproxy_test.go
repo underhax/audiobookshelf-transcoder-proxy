@@ -1128,6 +1128,49 @@ func TestServer_Proxy_MidStreamEOFDropRetry(t *testing.T) {
 	}
 }
 
+func TestServer_Proxy_SpoolThenStreamComplete(t *testing.T) {
+	var requestCount atomic.Int32
+	s := New("http://example.com", "token", "test", true)
+	s.spoolBytes = 2
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			requestCount.Add(1)
+			resp := &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("abcde")),
+				ContentLength: 5,
+			}
+			resp.Header.Set("Content-Type", "audio/mpeg")
+			return resp, nil
+		}),
+	}
+
+	sessionID := "sess-spool-stream"
+	token, err := s.RegisterSession(sessionID, []string{"/spool-stream.mp3"})
+	if err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if rec.Body.String() != "abcde" {
+		t.Fatalf("expected full body without spurious retry, got %q", rec.Body.String())
+	}
+	if requestCount.Load() != 1 {
+		t.Fatalf("expected 1 upstream request on complete spool+stream, got %d", requestCount.Load())
+	}
+}
+
 func TestServer_Proxy_RetryExhaustAfterCommit(t *testing.T) {
 	var requestCount atomic.Int32
 	s := New("http://example.com", "token", "test", false)

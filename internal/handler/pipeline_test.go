@@ -81,7 +81,7 @@ func TestCalculateSeekOffset(t *testing.T) {
 func TestPrepareInput_EmptyTracks(t *testing.T) {
 	t.Parallel()
 
-	_, _, _, err := prepareInput(8080, "sess-empty", "dummy-tok", []absclient.AudioTrack{}, 0)
+	_, _, _, err := prepareInput(8080, "sess-empty", "dummy-tok", []absclient.AudioTrack{}, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when audio tracks slice is empty")
 	}
@@ -93,7 +93,7 @@ func TestPrepareInput_SingleTrack(t *testing.T) {
 	tracks := []absclient.AudioTrack{
 		{Index: 0, ContentURL: "/single.mp3"},
 	}
-	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-single", "token-single", tracks, 0)
+	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-single", "token-single", tracks, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -109,6 +109,33 @@ func TestPrepareInput_SingleTrack(t *testing.T) {
 	if !strings.Contains(string(content), expectedEntry) {
 		t.Fatalf("expected concat content to contain %s, got %s", expectedEntry, string(content))
 	}
+	if strings.Contains(string(content), "inpoint") {
+		t.Fatalf("expected no inpoint for zero seek offset, got %s", string(content))
+	}
+	cleanup()
+}
+
+func TestPrepareInput_WithSeekOffset(t *testing.T) {
+	t.Parallel()
+
+	tracks := []absclient.AudioTrack{
+		{Index: 0, ContentURL: "/seek-track.mp3"},
+	}
+	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-seek", "token-seek", tracks, 0, 123.45)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !isConcat {
+		t.Fatal("expected isConcat true for single track")
+	}
+	cleanPath := filepath.Clean(filePath)
+	content, readErr := os.ReadFile(cleanPath)
+	if readErr != nil {
+		t.Fatalf("read concat file: %v", readErr)
+	}
+	if !strings.Contains(string(content), "inpoint 123.45\n") {
+		t.Fatalf("expected inpoint 123.45 in concat file, got %s", string(content))
+	}
 	cleanup()
 }
 
@@ -118,7 +145,7 @@ func TestPrepareInput_GenerateConcatError(t *testing.T) {
 		{Index: 0, ContentURL: "/t1.mp3"},
 		{Index: 1, ContentURL: "/t2.mp3"},
 	}
-	if _, _, _, err := prepareInput(8080, "sess-concat-err", "dummy-tok", tracks, 0); err == nil {
+	if _, _, _, err := prepareInput(8080, "sess-concat-err", "dummy-tok", tracks, 0, 0); err == nil {
 		t.Fatal("expected error from defaultGenerateConcat when TMPDIR is invalid")
 	}
 }
@@ -131,7 +158,7 @@ func TestPrepareInput_CleanupError(t *testing.T) {
 	}
 
 	orig := generateConcat
-	generateConcat = func(_ string, _ []string) (string, error) {
+	generateConcat = func(_ string, _ []string, _ float64) (string, error) {
 		return dir, nil
 	}
 	defer func() { generateConcat = orig }()
@@ -140,7 +167,7 @@ func TestPrepareInput_CleanupError(t *testing.T) {
 		{Index: 0, ContentURL: "/cleanup-track-1.mp3"},
 		{Index: 1, ContentURL: "/cleanup-track-2.mp3"},
 	}
-	_, _, cleanup, err := prepareInput(8080, "sess-cleanup", "dummy-tok", tracks, 0)
+	_, _, cleanup, err := prepareInput(8080, "sess-cleanup", "dummy-tok", tracks, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}

@@ -163,8 +163,8 @@ func calculateSeekOffset(tracks []absclient.AudioTrack, currentTime float64) (se
 	return currentTime, 0
 }
 
-func defaultGenerateConcat(baseURL string, trackURLs []string) (string, error) {
-	path, err := ffmpeg.GenerateConcatFile(baseURL, trackURLs)
+func defaultGenerateConcat(baseURL string, trackURLs []string, inpoint float64) (string, error) {
+	path, err := ffmpeg.GenerateConcatFile(baseURL, trackURLs, inpoint)
 	if err != nil {
 		return "", fmt.Errorf("generate concat: %w", err)
 	}
@@ -173,7 +173,7 @@ func defaultGenerateConcat(baseURL string, trackURLs []string) (string, error) {
 
 var generateConcat = defaultGenerateConcat
 
-func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclient.AudioTrack, startIdx int) (inputPath string, isConcat bool, cleanup func(), err error) {
+func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclient.AudioTrack, startIdx int, seekOffset float64) (inputPath string, isConcat bool, cleanup func(), err error) {
 	if len(tracks) == 0 {
 		return "", false, func() {}, errors.New("no audio tracks available")
 	}
@@ -183,7 +183,7 @@ func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclien
 		trackURLs = append(trackURLs, fmt.Sprintf("http://127.0.0.1:%d/track/%s/%d?token=%s", proxyPort, sessionID, i, proxyToken))
 	}
 
-	concatPath, err := generateConcat("", trackURLs)
+	concatPath, err := generateConcat("", trackURLs, seekOffset)
 	if err != nil {
 		return "", false, nil, fmt.Errorf("generate concat file: %w", err)
 	}
@@ -299,7 +299,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unregister()
 
-	inputPath, isConcat, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex)
+	inputPath, isConcat, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex, sess.SeekOffset)
 	if err != nil {
 		log.Printf("prepare input failed: %v", err)
 		http.Error(w, `{"error":"failed to prepare media input"}`, http.StatusInternalServerError)

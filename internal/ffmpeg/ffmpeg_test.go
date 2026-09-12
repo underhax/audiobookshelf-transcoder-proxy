@@ -33,7 +33,7 @@ func TestBuildArgs(t *testing.T) {
 				IsConcat:   false,
 			},
 			wantSubstr: []string{"-user_agent", "abstp/1.2.3", "-rw_timeout", "60000000", "-probesize", "32768", "-analyzeduration", "100000", "-i", "http://abs.example.org/audio.mp3", "-f", "adts"},
-			notSubstr:  []string{"-f concat", "-ss", "atempo", "-headers"},
+			notSubstr:  []string{"-f concat", "atempo", "-headers"},
 		},
 		{
 			name: "concat multi track with seek and custom speed without version",
@@ -44,8 +44,20 @@ func TestBuildArgs(t *testing.T) {
 				SeekOffset: 120.5,
 				IsConcat:   true,
 			},
-			wantSubstr: []string{"-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-ss", "120.50", "-filter:a", "atempo=1.75"},
-			notSubstr:  []string{"-headers", "-user_agent"},
+			wantSubstr: []string{"-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-filter:a", "atempo=1.75"},
+			notSubstr:  []string{"-headers", "-user_agent", "-ss"},
+		},
+		{
+			name: "single track with seek",
+			params: Params{
+				FFmpegPath: "/usr/local/bin/ffmpeg-v2",
+				InputPath:  "http://abs.example.net/seek-audio.mp3",
+				Speed:      1.0,
+				SeekOffset: 42.5,
+				IsConcat:   false,
+			},
+			wantSubstr: []string{"-ss", "42.50", "-i", "http://abs.example.net/seek-audio.mp3"},
+			notSubstr:  []string{"-f concat"},
 		},
 	}
 
@@ -80,7 +92,7 @@ func TestGenerateConcatFile_Success(t *testing.T) {
 		"/s/item/book1/ch2.mp3",
 	}
 
-	filePath, err := GenerateConcatFile(baseURL, tracks)
+	filePath, err := GenerateConcatFile(baseURL, tracks, 45.67)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -99,8 +111,28 @@ func TestGenerateConcatFile_Success(t *testing.T) {
 	if !strings.Contains(content, "file 'http://abs.example.net:13378/s/item/book1/ch'\\''1.mp3'") {
 		t.Errorf("content does not contain escaped single quote: %s", content)
 	}
+	if !strings.Contains(content, "inpoint 45.67\n") {
+		t.Errorf("content does not contain expected inpoint: %s", content)
+	}
 	if !strings.Contains(content, "file 'http://abs.example.net:13378/s/item/book1/ch2.mp3'") {
 		t.Errorf("content does not contain second file: %s", content)
+	}
+
+	filePathZero, errZero := GenerateConcatFile(baseURL, tracks, 0)
+	if errZero != nil {
+		t.Fatalf("unexpected error with zero inpoint: %v", errZero)
+	}
+	defer func() {
+		if rmErr := os.Remove(filePathZero); rmErr != nil {
+			t.Errorf("remove error: %v", rmErr)
+		}
+	}()
+	dataZero, readZeroErr := os.ReadFile(filepath.Clean(filePathZero))
+	if readZeroErr != nil {
+		t.Fatalf("read zero inpoint file: %v", readZeroErr)
+	}
+	if strings.Contains(string(dataZero), "inpoint") {
+		t.Errorf("expected no inpoint for 0 offset, got: %s", string(dataZero))
 	}
 }
 
@@ -111,7 +143,7 @@ func TestGenerateConcatFile_Errors(t *testing.T) {
 	}
 	defer func() { createTemp = origTemp }()
 
-	_, err := GenerateConcatFile("http://abs.example.com", []string{"/error-sample.mp3"})
+	_, err := GenerateConcatFile("http://abs.example.com", []string{"/error-sample.mp3"}, 0)
 	if err == nil {
 		t.Fatal("expected error when createTemp fails")
 	}
@@ -134,7 +166,7 @@ func TestGenerateConcatFile_Errors(t *testing.T) {
 		return closedTemp, nil
 	}
 
-	if _, genErr := GenerateConcatFile("http://abs.example.com", []string{"/track.mp3"}); genErr == nil {
+	if _, genErr := GenerateConcatFile("http://abs.example.com", []string{"/track.mp3"}, 0); genErr == nil {
 		t.Fatal("expected error writing to closed file")
 	}
 

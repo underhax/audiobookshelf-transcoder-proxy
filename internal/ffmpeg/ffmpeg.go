@@ -54,7 +54,7 @@ func BuildArgs(params *Params) []string {
 		args = append(args, "-user_agent", userAgent)
 	}
 
-	if params.SeekOffset > 0 {
+	if !params.IsConcat && params.SeekOffset > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(params.SeekOffset, 'f', 2, 64))
 	}
 
@@ -180,7 +180,7 @@ func BuildMediaURL(baseURL, trackURL string) string {
 }
 
 // GenerateConcatFile creates a temporary file compatible with FFmpeg concat demuxer listing all tracks from startIndex.
-func GenerateConcatFile(baseURL string, trackURLs []string) (filePath string, err error) {
+func GenerateConcatFile(baseURL string, trackURLs []string, inpoint float64) (filePath string, err error) {
 	tmpFile, err := createTemp("", "abstp-concat-*.txt")
 	if err != nil {
 		return "", err
@@ -188,12 +188,17 @@ func GenerateConcatFile(baseURL string, trackURLs []string) (filePath string, er
 	tmpPath := tmpFile.Name()
 
 	var sb strings.Builder
-	for _, u := range trackURLs {
+	for i, u := range trackURLs {
 		fullURL := BuildMediaURL(baseURL, u)
 		escaped := strings.ReplaceAll(fullURL, "'", "'\\''")
 		sb.WriteString("file '")
 		sb.WriteString(escaped)
 		sb.WriteString("'\n")
+		if i == 0 && inpoint > 0 {
+			sb.WriteString("inpoint ")
+			sb.WriteString(strconv.FormatFloat(inpoint, 'f', 2, 64))
+			sb.WriteString("\n")
+		}
 	}
 
 	_, writeErr := tmpFile.WriteString(sb.String())

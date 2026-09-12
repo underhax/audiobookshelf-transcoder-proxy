@@ -34,6 +34,7 @@ type Session struct {
 	MediaType          string
 	AudioTracks        []absclient.AudioTrack
 	lastSyncBits       atomic.Uint64
+	audioStartNano     atomic.Int64
 	BytesSent          atomic.Int64
 	CurrentTime        float64
 	Duration           float64
@@ -51,6 +52,29 @@ func (s *Session) GetLastSyncPosition() float64 {
 // SetLastSyncPosition atomically records the latest synchronized playback timestamp to prevent data races during background sync.
 func (s *Session) SetLastSyncPosition(pos float64) {
 	s.lastSyncBits.Store(math.Float64bits(pos))
+}
+
+// SetAudioStartTime atomically records the timestamp when the first audio payload byte was streamed to the client.
+func (s *Session) SetAudioStartTime(t time.Time) {
+	s.audioStartNano.Store(t.UnixNano())
+}
+
+// GetAudioStartTime atomically returns the timestamp when the first audio payload byte was streamed, or a zero time.Time if streaming has not started.
+func (s *Session) GetAudioStartTime() time.Time {
+	nano := s.audioStartNano.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
+}
+
+// AudioElapsed returns the elapsed duration since audio streaming began, or 0 if streaming has not started.
+func (s *Session) AudioElapsed(now time.Time) time.Duration {
+	start := s.GetAudioStartTime()
+	if start.IsZero() {
+		return 0
+	}
+	return max(0, now.Sub(start))
 }
 
 var defaultTokenTTL = 120 * time.Second

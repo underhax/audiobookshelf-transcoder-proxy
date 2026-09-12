@@ -291,3 +291,49 @@ func TestGenerateToken(t *testing.T) {
 		t.Error("expected error when randRead fails")
 	}
 }
+
+func TestSession_AudioStartTimeAndElapsed(t *testing.T) {
+	t.Parallel()
+
+	sess := &Session{ID: "sess_audio_time"}
+	if !sess.GetAudioStartTime().IsZero() {
+		t.Errorf("expected zero initial audio start time, got %v", sess.GetAudioStartTime())
+	}
+	if got := sess.AudioElapsed(time.Now()); got != 0 {
+		t.Errorf("expected 0 elapsed duration before start time set, got %v", got)
+	}
+
+	startTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	sess.SetAudioStartTime(startTime)
+
+	if got := sess.GetAudioStartTime(); !got.Equal(startTime) {
+		t.Errorf("got %v, want %v", got, startTime)
+	}
+
+	tests := []struct {
+		now  time.Time
+		name string
+		want time.Duration
+	}{
+		{
+			now:  startTime.Add(5 * time.Second),
+			name: "elapsed after five seconds",
+			want: 5 * time.Second,
+		},
+		{
+			now:  startTime.Add(-5 * time.Second),
+			name: "now is before start time clamps to zero",
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sess.AudioElapsed(tt.now)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

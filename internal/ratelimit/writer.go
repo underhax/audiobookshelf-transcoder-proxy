@@ -11,10 +11,10 @@ import (
 	"time"
 )
 
-// Rate limiting configuration defaults for CBR audio streaming (64 kbps target rate and 10-second initial burst).
+// Rate limiting configuration defaults for CBR audio streaming (64 kbps target rate in ADTS container and 10-second initial burst).
 const (
-	DefaultBurstBytes     int64 = 80000
-	DefaultBytesPerSecond int64 = 8000
+	DefaultBurstBytes     int64 = 83700
+	DefaultBytesPerSecond int64 = 8370
 	TickInterval                = 100 * time.Millisecond
 )
 

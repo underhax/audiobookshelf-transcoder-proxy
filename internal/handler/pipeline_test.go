@@ -360,6 +360,7 @@ func TestCalculateCurrentPosition(t *testing.T) {
 		bytesSent      int64
 		speed          float64
 		bufferDuration time.Duration
+		clockElapsed   time.Duration
 		want           float64
 	}{
 		{
@@ -368,46 +369,79 @@ func TestCalculateCurrentPosition(t *testing.T) {
 			bytesSent:      0,
 			speed:          1.0,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
 			want:           100.0,
 		},
 		{
 			name:           "bytes sent within buffer duration does not advance position",
 			initialTime:    50.0,
-			bytesSent:      40000,
+			bytesSent:      41850,
 			speed:          1.0,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
 			want:           50.0,
 		},
 		{
 			name:           "bytes sent exactly matching buffer duration does not advance position",
 			initialTime:    0.0,
-			bytesSent:      80000,
+			bytesSent:      83700,
 			speed:          1.0,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
 			want:           0.0,
 		},
 		{
 			name:           "bytes sent exceeding buffer advances position with normal speed",
 			initialTime:    10.0,
-			bytesSent:      160000,
+			bytesSent:      167400,
 			speed:          1.0,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
 			want:           20.0,
 		},
 		{
 			name:           "bytes sent exceeding buffer advances position with custom playback speed",
 			initialTime:    100.0,
-			bytesSent:      160000,
+			bytesSent:      167400,
 			speed:          1.5,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
 			want:           115.0,
 		},
 		{
 			name:           "fallback to default 1.0 speed when non-positive speed is provided",
 			initialTime:    100.0,
-			bytesSent:      160000,
+			bytesSent:      167400,
 			speed:          0.0,
 			bufferDuration: 10 * time.Second,
+			clockElapsed:   0,
+			want:           110.0,
+		},
+		{
+			name:           "clock elapsed clamps position when client buffers ahead",
+			initialTime:    100.0,
+			bytesSent:      167400,
+			speed:          1.0,
+			bufferDuration: 10 * time.Second,
+			clockElapsed:   5 * time.Second,
+			want:           105.0,
+		},
+		{
+			name:           "clock elapsed clamps position with playback speed scaling",
+			initialTime:    100.0,
+			bytesSent:      167400,
+			speed:          1.5,
+			bufferDuration: 10 * time.Second,
+			clockElapsed:   5 * time.Second,
+			want:           107.5,
+		},
+		{
+			name:           "bytes limit prevents advancement when clock elapsed exceeds transmitted audio",
+			initialTime:    100.0,
+			bytesSent:      167400,
+			speed:          1.0,
+			bufferDuration: 10 * time.Second,
+			clockElapsed:   25 * time.Second,
 			want:           110.0,
 		},
 	}
@@ -415,7 +449,7 @@ func TestCalculateCurrentPosition(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := calculateCurrentPosition(tt.initialTime, tt.bytesSent, tt.speed, tt.bufferDuration)
+			got := calculateCurrentPosition(tt.initialTime, tt.bytesSent, tt.speed, tt.bufferDuration, tt.clockElapsed)
 			if got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}

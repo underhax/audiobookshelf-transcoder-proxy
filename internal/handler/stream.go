@@ -374,7 +374,7 @@ func (h *Handler) validateStreamRequest(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) handleDisconnectSync(ctx context.Context, sess *session.Session) {
-	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration)
+	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
 	syncReq := absclient.SyncRequest{
 		CurrentTime:  currentPos,
 		TimeListened: currentPos - sess.GetLastSyncPosition(),
@@ -497,6 +497,7 @@ func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader
 			writeMu.Lock()
 			if sess.BytesSent.Load() == 0 {
 				keepaliveCancel()
+				sess.SetAudioStartTime(time.Now())
 				if !h.cfg.DevReusableToken {
 					h.store.MarkTokenUsed(sess.ID)
 				}
@@ -543,7 +544,7 @@ func (h *Handler) logStreamProgress(ctx context.Context, sess *session.Session, 
 		case <-stop:
 			return
 		case <-ticker.C:
-			pos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration)
+			pos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
 			log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] progress session=%s elapsed=%s bytes=%d position=%.1f",
 				sessionID, time.Since(start).Truncate(time.Second), sess.BytesSent.Load(), pos), "\n", " "))
 		}
@@ -560,8 +561,11 @@ func (h *Handler) logStreamEnd(sessionID string, sess *session.Session, elapsed 
 	}
 }
 
-func calculateCurrentPosition(initialTime float64, bytesSent int64, speed float64, bufferDuration time.Duration) float64 {
+func calculateCurrentPosition(initialTime float64, bytesSent int64, speed float64, bufferDuration, clockElapsed time.Duration) float64 {
 	playedSeconds := max(0, (float64(bytesSent)/float64(ratelimit.DefaultBytesPerSecond))-bufferDuration.Seconds())
+	if clockElapsed > 0 {
+		playedSeconds = min(playedSeconds, clockElapsed.Seconds())
+	}
 	if speed <= 0 {
 		speed = 1.0
 	}
@@ -583,7 +587,7 @@ func (h *Handler) runSyncLoop(ctx context.Context, sess *session.Session, stop <
 		case <-stop:
 			return
 		case <-ticker.C:
-			currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration)
+			currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
 			syncReq := absclient.SyncRequest{
 				CurrentTime:  currentPos,
 				TimeListened: currentPos - sess.GetLastSyncPosition(),
@@ -634,7 +638,7 @@ func (h *Handler) handleSessionTerminate(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration)
+	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
 	syncReq := absclient.SyncRequest{
 		CurrentTime:  currentPos,
 		TimeListened: currentPos - sess.GetLastSyncPosition(),

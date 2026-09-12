@@ -23,41 +23,24 @@ func TestBuildArgs(t *testing.T) {
 		params     Params
 	}{
 		{
-			name: "single track without seek or speed alteration",
+			name: "concat stream with default speed",
 			params: Params{
 				FFmpegPath: "/opt/bin/ffmpeg-custom",
-				InputPath:  "http://abs.example.org/audio.mp3",
-				Version:    "1.2.3",
+				InputPath:  "/tmp/concat-default.txt",
 				Speed:      1.0,
-				SeekOffset: 0.0,
-				IsConcat:   false,
 			},
-			wantSubstr: []string{"-user_agent", "abstp/1.2.3", "-rw_timeout", "60000000", "-probesize", "32768", "-analyzeduration", "100000", "-i", "http://abs.example.org/audio.mp3", "-f", "adts"},
-			notSubstr:  []string{"-f concat", "atempo", "-headers"},
+			wantSubstr: []string{"-rw_timeout", "60000000", "-probesize", "32768", "-analyzeduration", "100000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-i", "/tmp/concat-default.txt", "-f", "adts", "-c:a", "aac", "-b:a", "64k", "-flush_packets", "1", "pipe:1"},
+			notSubstr:  []string{"atempo", "-headers", "-user_agent", "-ss"},
 		},
 		{
-			name: "concat multi track with seek and custom speed without version",
+			name: "concat stream with altered speed",
 			params: Params{
 				FFmpegPath: "/usr/local/bin/ffmpeg-v2",
-				InputPath:  "/tmp/concat.txt",
+				InputPath:  "/tmp/concat-speed.txt",
 				Speed:      1.75,
-				SeekOffset: 120.5,
-				IsConcat:   true,
 			},
 			wantSubstr: []string{"-rw_timeout", "60000000", "-f", "concat", "-safe", "0", "-protocol_whitelist", "-filter:a", "atempo=1.75"},
 			notSubstr:  []string{"-headers", "-user_agent", "-ss"},
-		},
-		{
-			name: "single track with seek",
-			params: Params{
-				FFmpegPath: "/usr/local/bin/ffmpeg-v2",
-				InputPath:  "http://abs.example.net/seek-audio.mp3",
-				Speed:      1.0,
-				SeekOffset: 42.5,
-				IsConcat:   false,
-			},
-			wantSubstr: []string{"-ss", "42.50", "-i", "http://abs.example.net/seek-audio.mp3"},
-			notSubstr:  []string{"-f concat"},
 		},
 	}
 

@@ -26,6 +26,8 @@ import (
 const sessionIdleTimeout = 45 * time.Second
 const defaultSpoolBytes = 256 * 1024
 const progressLogInterval = 1024 * 1024
+const defaultMinHealthyDuration = 5 * time.Second
+const defaultMinHealthyBytes = 256 * 1024
 
 type sessionState struct {
 	token        string
@@ -35,17 +37,19 @@ type sessionState struct {
 
 // Server coordinates the internal loopback HTTP listener and upstream Audiobookshelf audio proxying.
 type Server struct {
-	listener    net.Listener
-	server      *http.Server
-	httpClient  *http.Client
-	sessions    sync.Map
-	absURL      string
-	token       string
-	version     string
-	retryDelays []time.Duration
-	spoolBytes  int
-	port        int
-	debug       bool
+	listener           net.Listener
+	server             *http.Server
+	httpClient         *http.Client
+	sessions           sync.Map
+	absURL             string
+	token              string
+	version            string
+	retryDelays        []time.Duration
+	minHealthyDuration time.Duration
+	spoolBytes         int
+	minHealthyBytes    int
+	port               int
+	debug              bool
 }
 
 // New constructs a Server configured with dedicated upstream HTTP transport settings and exponential backoff intervals.
@@ -71,7 +75,9 @@ func New(absURL, token, version string, debug bool) *Server {
 			8 * time.Second,
 			16 * time.Second,
 		},
-		spoolBytes: defaultSpoolBytes,
+		spoolBytes:         defaultSpoolBytes,
+		minHealthyDuration: defaultMinHealthyDuration,
+		minHealthyBytes:    defaultMinHealthyBytes,
 	}
 }
 
@@ -499,6 +505,22 @@ func (s *Server) commitInitialHeaders(w http.ResponseWriter, resp *http.Response
 	return true, false, int64(len(spooled)), nil
 }
 
+func (s *Server) isAttemptHealthy(duration time.Duration, bytes int64) bool {
+	if s.minHealthyDuration > 0 && duration >= s.minHealthyDuration && bytes > 0 {
+		return true
+	}
+	return s.minHealthyBytes > 0 && bytes >= int64(s.minHealthyBytes)
+}
+
+func waitRetryDelay(ctx context.Context, delay time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(delay):
+		return true
+	}
+}
+
 func (s *Server) proxyWithRetry(ctx context.Context, w http.ResponseWriter, upstreamURL string, initRange rangeHeader, lastActivity *atomic.Int64) {
 	var flusher http.Flusher
 	if f, ok := w.(http.Flusher); ok {
@@ -517,25 +539,38 @@ func (s *Server) proxyWithRetry(ctx context.Context, w http.ResponseWriter, upst
 		}
 	}()
 
-	maxAttempts := len(s.retryDelays) + 1
-	for attempt := range maxAttempts {
-		if attempt > 0 {
-			delay := s.retryDelays[attempt-1]
-			if s.debug {
-				log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: retry %d/%d after %v delay (bytes written: %d)", attempt, len(s.retryDelays), delay, bytesWritten), "\n", " "), "\r", ""))
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-			}
-		}
-
+	consecutiveFailures := 0
+	for {
+		startBytes := bytesWritten
+		attemptStart := time.Now()
 		completed, clientErr := s.executeAttempt(ctx, w, upstreamURL, initRange, flusher, &bytesWritten, &headersSent, lastActivity)
 		if s.debug {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: attempt %d finished: completed=%v, clientErr=%v, bytesWritten=%d", attempt, completed, clientErr, bytesWritten), "\n", " "), "\r", ""))
+			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: attempt finished: completed=%v, clientErr=%v, bytesWritten=%d", completed, clientErr, bytesWritten), "\n", " "), "\r", ""))
 		}
 		if clientErr != nil || completed {
+			return
+		}
+
+		attemptBytes := bytesWritten - startBytes
+		if s.isAttemptHealthy(time.Since(attemptStart), attemptBytes) {
+			consecutiveFailures = 0
+		}
+
+		if consecutiveFailures >= len(s.retryDelays) {
+			if s.debug {
+				log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: max retry attempts (%d) reached without progress, aborting", len(s.retryDelays)), "\n", " "), "\r", ""))
+			}
+			break
+		}
+
+		delay := s.retryDelays[consecutiveFailures]
+		consecutiveFailures++
+
+		if s.debug {
+			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: retry %d/%d after %v delay (bytes written: %d)", consecutiveFailures, len(s.retryDelays), delay, bytesWritten), "\n", " "), "\r", ""))
+		}
+
+		if !waitRetryDelay(ctx, delay) {
 			return
 		}
 	}

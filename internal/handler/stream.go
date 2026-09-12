@@ -173,9 +173,9 @@ func defaultGenerateConcat(baseURL string, trackURLs []string, inpoint float64) 
 
 var generateConcat = defaultGenerateConcat
 
-func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclient.AudioTrack, startIdx int, seekOffset float64) (inputPath string, isConcat bool, cleanup func(), err error) {
+func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclient.AudioTrack, startIdx int, seekOffset float64) (inputPath string, cleanup func(), err error) {
 	if len(tracks) == 0 {
-		return "", false, func() {}, errors.New("no audio tracks available")
+		return "", func() {}, errors.New("no audio tracks available")
 	}
 
 	trackURLs := make([]string, 0, len(tracks)-startIdx)
@@ -185,7 +185,7 @@ func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclien
 
 	concatPath, err := generateConcat("", trackURLs, seekOffset)
 	if err != nil {
-		return "", false, nil, fmt.Errorf("generate concat file: %w", err)
+		return "", nil, fmt.Errorf("generate concat file: %w", err)
 	}
 
 	cleanup = func() {
@@ -195,7 +195,7 @@ func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclien
 		}
 	}
 
-	return concatPath, true, cleanup, nil
+	return concatPath, cleanup, nil
 }
 
 func defaultTrackProxyRegisterSession(tp *trackproxy.Server, sessionID string, trackURLs []string) (string, error) {
@@ -235,18 +235,11 @@ func (h *Handler) registerTrackProxySession(sessionID string, tracks []absclient
 	}, nil
 }
 
-func (h *Handler) buildFFmpegParams(inputPath string, isConcat bool, sess *session.Session) ffmpeg.Params {
-	version := ""
-	if h.absClient != nil {
-		version = h.absClient.Version()
-	}
+func (h *Handler) buildFFmpegParams(inputPath string, sess *session.Session) ffmpeg.Params {
 	return ffmpeg.Params{
 		FFmpegPath: h.cfg.FFmpegPath,
 		InputPath:  inputPath,
-		Version:    version,
 		Speed:      sess.Speed,
-		SeekOffset: sess.SeekOffset,
-		IsConcat:   isConcat,
 	}
 }
 
@@ -299,7 +292,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unregister()
 
-	inputPath, isConcat, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex, sess.SeekOffset)
+	inputPath, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex, sess.SeekOffset)
 	if err != nil {
 		log.Printf("prepare input failed: %v", err)
 		http.Error(w, `{"error":"failed to prepare media input"}`, http.StatusInternalServerError)
@@ -311,7 +304,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	defer cancelStream()
 	sess.Cancel = cancelStream
 
-	params := h.buildFFmpegParams(inputPath, isConcat, sess)
+	params := h.buildFFmpegParams(inputPath, sess)
 
 	cmd, stdout, stderrBuf, err := ffmpeg.StartProcess(streamCtx, &params)
 	if err != nil {

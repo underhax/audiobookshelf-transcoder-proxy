@@ -1,6 +1,7 @@
 package trackproxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -1625,5 +1626,67 @@ func TestExecuteAttempt_CommitWriteError(t *testing.T) {
 				t.Error("expected write error")
 			}
 		})
+	}
+}
+
+func TestServer_Proxy_RetryResetAfterHealthy(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	s := New("http://abs.example.org", "token", "test", false)
+	s.spoolBytes = 2
+	s.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	s.minHealthyDuration = 10 * time.Millisecond
+	s.minHealthyBytes = 50
+
+	s.httpClient = &http.Client{
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			att := attempts.Add(1)
+			switch att {
+			case 1:
+				data := bytes.Repeat([]byte("a"), 60)
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        make(http.Header),
+					Body:          &errAfterReader{data: data, err: errors.New("drop after healthy bytes")},
+					ContentLength: -1,
+				}, nil
+			case 2:
+				time.Sleep(15 * time.Millisecond)
+				return &http.Response{
+					StatusCode:    http.StatusPartialContent,
+					Header:        make(http.Header),
+					Body:          &errAfterReader{data: []byte("b"), err: errors.New("drop after healthy duration")},
+					ContentLength: -1,
+				}, nil
+			case 3:
+				return nil, errors.New("immediate drop 1")
+			case 4:
+				return nil, errors.New("immediate drop 2")
+			default:
+				return nil, errors.New("unexpected attempt")
+			}
+		}),
+	}
+
+	sessionID := "sess-healthy-reset"
+	token, err := s.RegisterSession(sessionID, []string{"/healthy.mp3"})
+	if err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected committed status 200, got %d", rec.Code)
+	}
+	if attempts.Load() != 4 {
+		t.Fatalf("expected 4 attempts (2 healthy resets + 2 exhausted failures), got %d", attempts.Load())
 	}
 }

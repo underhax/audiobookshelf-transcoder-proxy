@@ -19,10 +19,7 @@ import (
 type Params struct {
 	FFmpegPath string
 	InputPath  string
-	Version    string
 	Speed      float64
-	SeekOffset float64
-	IsConcat   bool
 }
 
 // BuildArgs constructs the slice of command-line arguments passed to FFmpeg.
@@ -31,34 +28,17 @@ func BuildArgs(params *Params) []string {
 		return nil
 	}
 
-	userAgent := "abstp"
-	if params.Version != "" {
-		userAgent = "abstp/" + params.Version
-	}
-
 	args := []string{
 		"-hide_banner",
 		"-loglevel", "error",
 		"-rw_timeout", "60000000",
 		"-probesize", "32768",
 		"-analyzeduration", "100000",
+		"-f", "concat",
+		"-safe", "0",
+		"-protocol_whitelist", "file,http,https,tcp,tls",
+		"-i", params.InputPath,
 	}
-
-	if params.IsConcat {
-		args = append(args,
-			"-f", "concat",
-			"-safe", "0",
-			"-protocol_whitelist", "file,http,https,tcp,tls",
-		)
-	} else {
-		args = append(args, "-user_agent", userAgent)
-	}
-
-	if !params.IsConcat && params.SeekOffset > 0 {
-		args = append(args, "-ss", strconv.FormatFloat(params.SeekOffset, 'f', 2, 64))
-	}
-
-	args = append(args, "-i", params.InputPath)
 
 	if params.Speed != 1.0 && params.Speed > 0 {
 		args = append(args, "-filter:a", "atempo="+strconv.FormatFloat(params.Speed, 'f', 2, 64))

@@ -81,7 +81,7 @@ func TestCalculateSeekOffset(t *testing.T) {
 func TestPrepareInput_EmptyTracks(t *testing.T) {
 	t.Parallel()
 
-	_, _, _, err := prepareInput(8080, "sess-empty", "dummy-tok", []absclient.AudioTrack{}, 0, 0)
+	_, _, err := prepareInput(8080, "sess-empty", "dummy-tok", []absclient.AudioTrack{}, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when audio tracks slice is empty")
 	}
@@ -93,12 +93,9 @@ func TestPrepareInput_SingleTrack(t *testing.T) {
 	tracks := []absclient.AudioTrack{
 		{Index: 0, ContentURL: "/single.mp3"},
 	}
-	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-single", "token-single", tracks, 0, 0)
+	filePath, cleanup, err := prepareInput(54321, "sess-single", "token-single", tracks, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
-	}
-	if !isConcat {
-		t.Fatal("expected isConcat true for single track to hide tokens in ps aux")
 	}
 	cleanPath := filepath.Clean(filePath)
 	content, readErr := os.ReadFile(cleanPath)
@@ -121,12 +118,9 @@ func TestPrepareInput_WithSeekOffset(t *testing.T) {
 	tracks := []absclient.AudioTrack{
 		{Index: 0, ContentURL: "/seek-track.mp3"},
 	}
-	filePath, isConcat, cleanup, err := prepareInput(54321, "sess-seek", "token-seek", tracks, 0, 123.45)
+	filePath, cleanup, err := prepareInput(54321, "sess-seek", "token-seek", tracks, 0, 123.45)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
-	}
-	if !isConcat {
-		t.Fatal("expected isConcat true for single track")
 	}
 	cleanPath := filepath.Clean(filePath)
 	content, readErr := os.ReadFile(cleanPath)
@@ -145,7 +139,7 @@ func TestPrepareInput_GenerateConcatError(t *testing.T) {
 		{Index: 0, ContentURL: "/t1.mp3"},
 		{Index: 1, ContentURL: "/t2.mp3"},
 	}
-	if _, _, _, err := prepareInput(8080, "sess-concat-err", "dummy-tok", tracks, 0, 0); err == nil {
+	if _, _, err := prepareInput(8080, "sess-concat-err", "dummy-tok", tracks, 0, 0); err == nil {
 		t.Fatal("expected error from defaultGenerateConcat when TMPDIR is invalid")
 	}
 }
@@ -167,7 +161,7 @@ func TestPrepareInput_CleanupError(t *testing.T) {
 		{Index: 0, ContentURL: "/cleanup-track-1.mp3"},
 		{Index: 1, ContentURL: "/cleanup-track-2.mp3"},
 	}
-	_, _, cleanup, err := prepareInput(8080, "sess-cleanup", "dummy-tok", tracks, 0, 0)
+	_, cleanup, err := prepareInput(8080, "sess-cleanup", "dummy-tok", tracks, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}

@@ -55,15 +55,6 @@ func (b *blockingReader) Read(_ []byte) (int, error) {
 	return 0, io.EOF
 }
 
-type contextBlockingReader struct {
-	ctx context.Context
-}
-
-func (c *contextBlockingReader) Read(_ []byte) (int, error) {
-	<-c.ctx.Done()
-	return 0, c.ctx.Err()
-}
-
 func TestServer_Lifecycle(t *testing.T) {
 	s := New("http://example.com", "secret-token", "1.0.0", false)
 	port, err := s.Start()
@@ -353,115 +344,76 @@ func TestServer_Idle_Timeout(t *testing.T) {
 	}
 }
 
-func TestServer_Concurrency_Limit(t *testing.T) {
+func TestServer_Concurrency_Parallel(t *testing.T) {
 	s := New("http://example.com", "token", "1.0.0", false)
-	holdStream := make(chan struct{})
-	s.httpClient = &http.Client{
-		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     make(http.Header),
-				Body:       io.NopCloser(&blockingReader{block: holdStream}),
-			}, nil
-		}),
-	}
-
-	sessionID := "sess-concurrent"
-	token, err := s.RegisterSession(sessionID, []string{"/audio-concurrent-stream.mp3"})
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	started := make(chan struct{})
-	go func() {
-		req1 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-		req1.Header.Set("User-Agent", "abstp/1.0.0")
-		req1.SetPathValue("session_id", sessionID)
-		req1.SetPathValue("track_index", "0")
-		rec1 := httptest.NewRecorder()
-		close(started)
-		s.handleTrack(rec1, req1)
-	}()
-
-	<-started
-	time.Sleep(50 * time.Millisecond)
-
-	req2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-	req2.Header.Set("User-Agent", "abstp/1.0.0")
-	req2.SetPathValue("session_id", sessionID)
-	req2.SetPathValue("track_index", "0")
-	rec2 := httptest.NewRecorder()
-	s.handleTrack(rec2, req2)
-
-	close(holdStream)
-
-	if rec2.Code != http.StatusConflict {
-		t.Fatalf("expected status 409 Conflict for concurrent stream, got %d", rec2.Code)
-	}
-}
-
-func TestServer_Concurrency_Takeover(t *testing.T) {
-	s := New("http://takeover.example.com", "token", "1.0.0", false)
+	holdFirst := make(chan struct{})
+	firstStarted := make(chan struct{})
 	var calls atomic.Int32
 	s.httpClient = &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			if calls.Add(1) == 1 {
+				close(firstStarted)
 				return &http.Response{
-					StatusCode:    http.StatusOK,
-					Header:        make(http.Header),
-					Body:          io.NopCloser(&contextBlockingReader{ctx: req.Context()}),
-					ContentLength: -1,
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(&blockingReader{block: holdFirst}),
 				}, nil
 			}
 			return &http.Response{
 				StatusCode:    http.StatusOK,
 				Header:        make(http.Header),
-				Body:          io.NopCloser(strings.NewReader("second-response")),
-				ContentLength: -1,
+				Body:          io.NopCloser(strings.NewReader("second-response-body")),
+				ContentLength: int64(len("second-response-body")),
 			}, nil
 		}),
 	}
 
-	sessionID := "sess-takeover"
-	token, err := s.RegisterSession(sessionID, []string{"/audio-takeover-stream.mp3"})
+	sessionID := "sess-parallel"
+	token, err := s.RegisterSession(sessionID, []string{"/parallel-stream.mp3"})
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	started := make(chan struct{})
-	req1Done := make(chan struct{})
+	firstDone := make(chan struct{})
 	go func() {
-		req1 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-		req1.Header.Set("User-Agent", "abstp/1.0.0")
-		req1.SetPathValue("session_id", sessionID)
-		req1.SetPathValue("track_index", "0")
-		rec1 := httptest.NewRecorder()
-		close(started)
-		s.handleTrack(rec1, req1)
-		close(req1Done)
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+		req.Header.Set("User-Agent", "abstp/1.0.0")
+		req.SetPathValue("session_id", sessionID)
+		req.SetPathValue("track_index", "0")
+		rec := httptest.NewRecorder()
+		s.handleTrack(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected first concurrent stream to stay alive, got %d", rec.Code)
+		}
+		close(firstDone)
 	}()
 
-	<-started
-	time.Sleep(50 * time.Millisecond)
+	<-firstStarted
 
-	req2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
-	req2.Header.Set("User-Agent", "abstp/1.0.0")
-	req2.SetPathValue("session_id", sessionID)
-	req2.SetPathValue("track_index", "0")
-	rec2 := httptest.NewRecorder()
-	s.handleTrack(rec2, req2)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/0?token="+token, http.NoBody)
+	req.Header.Set("User-Agent", "abstp/1.0.0")
+	req.SetPathValue("session_id", sessionID)
+	req.SetPathValue("track_index", "0")
+	rec := httptest.NewRecorder()
+	s.handleTrack(rec, req)
 
 	select {
-	case <-req1Done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("stale stream was not canceled by takeover")
+	case <-firstDone:
+		t.Fatal("first stream was canceled by a concurrent request")
+	default:
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for concurrent request, got %d", rec.Code)
+	}
+	if rec.Body.String() != "second-response-body" {
+		t.Fatalf("expected second response body, got %q", rec.Body.String())
 	}
 
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("expected status 200 for takeover request, got %d", rec2.Code)
-	}
-	if rec2.Body.String() != "second-response" {
-		t.Fatalf("expected takeover response body, got %q", rec2.Body.String())
+	close(holdFirst)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first stream did not complete after unblock")
 	}
 }
 
@@ -1238,12 +1190,33 @@ func TestServer_Proxy_ClientWriteError(t *testing.T) {
 	var bytesWritten int64
 	ew := &errWriter{}
 
-	completed, err := streamResponseBody(ew, body, nil, &bytesWritten, nil, -1)
+	completed, err := streamResponseBody(ew, body, nil, &bytesWritten, nil, -1, false)
 	if err == nil {
 		t.Fatal("expected client write error")
 	}
 	if completed {
 		t.Fatal("expected stream not completed")
+	}
+}
+
+func TestStreamResponseBody_ProgressLog(t *testing.T) {
+	var lastActivity atomic.Int64
+	payload := strings.Repeat("p", 3*1024*1024)
+	rw := httptest.NewRecorder()
+	var bytesWritten int64
+
+	completed, err := streamResponseBody(rw, strings.NewReader(payload), nil, &bytesWritten, &lastActivity, int64(len(payload)), true)
+	if err != nil {
+		t.Fatalf("stream response body: %v", err)
+	}
+	if !completed {
+		t.Fatal("expected stream completed")
+	}
+	if bytesWritten != int64(len(payload)) {
+		t.Fatalf("expected %d bytes written, got %d", len(payload), bytesWritten)
+	}
+	if rw.Body.Len() != len(payload) {
+		t.Fatalf("expected %d bytes in recorder body, got %d", len(payload), rw.Body.Len())
 	}
 }
 
@@ -1496,17 +1469,6 @@ func TestResolveUpstreamURL_Errors(t *testing.T) {
 	}
 }
 
-func TestAcquireStream_ContextCanceled(t *testing.T) {
-	sem := make(chan struct{}, 1)
-	sem <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if acquireStream(ctx, sem) {
-		t.Error("expected acquireStream to return false on canceled context")
-	}
-}
-
 func TestResolveTrack_EmptyURL(t *testing.T) {
 	s := New("http://empty.example.org", "token", "1.0", false)
 	if _, status, _ := s.resolveTrack([]string{""}, "0"); status != http.StatusNotFound {
@@ -1521,16 +1483,6 @@ func TestHandleTrack_CanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register session: %v", err)
 	}
-
-	val, ok := s.sessions.Load(sessionID)
-	if !ok {
-		t.Fatal("expected session to be loaded")
-	}
-	state, ok := val.(*sessionState)
-	if !ok {
-		t.Fatal("expected valid sessionState")
-	}
-	state.sem <- struct{}{}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

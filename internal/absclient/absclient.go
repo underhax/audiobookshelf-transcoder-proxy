@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -86,7 +86,7 @@ func (c *Client) probeURL(ctx context.Context, probeTarget string) bool {
 		return false
 	}
 	if closeErr := resp.Body.Close(); closeErr != nil {
-		log.Printf("close probe body: %v", closeErr)
+		slog.Debug("close probe body error", "error", closeErr)
 	}
 	return resp.StatusCode == http.StatusOK
 }
@@ -214,6 +214,17 @@ func (c *Client) SyncSession(ctx context.Context, sessionID string, progress Syn
 	}
 
 	status, bodyBytes, err := c.sendAndReadBody(req)
+	if err != nil && ctx.Err() == nil {
+		retryReq, retryErr := c.newRequest(ctx, http.MethodPost, endpoint, progress)
+		if retryErr == nil {
+			retryStatus, retryBody, sendErr := c.sendAndReadBody(retryReq)
+			if sendErr == nil {
+				status = retryStatus
+				bodyBytes = retryBody
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -240,6 +251,11 @@ func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
 	status, bodyBytes, err := c.sendAndReadBody(req)
 	if err != nil {
 		return err
+	}
+
+	if status == http.StatusNotFound {
+		slog.Debug("session already closed on upstream server", "session_id", sessionID)
+		return nil
 	}
 
 	if status != http.StatusOK {
@@ -578,7 +594,7 @@ func (c *Client) GetCover(ctx context.Context, itemID string) (body io.ReadClose
 
 	if resp.StatusCode != http.StatusOK {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("close cover body error: %v", closeErr)
+			slog.Debug("close cover body error", "error", closeErr)
 		}
 		return nil, "", fmt.Errorf("fetch cover failed with status %d", resp.StatusCode)
 	}

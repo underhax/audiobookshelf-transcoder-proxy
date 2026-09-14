@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,7 @@ import (
 // Config maintains runtime proxy parameters and authentication settings validated on startup.
 type Config struct {
 	ABSURL           string
-	ABSToken         string
+	ABSAPIKey        string
 	APIKey           string
 	ListenAddr       string
 	ExternalURL      string
@@ -26,8 +27,8 @@ type Config struct {
 	BufferDuration   time.Duration
 	MaxConns         int
 	MaxStreams       int
+	LogLevel         slog.Level
 	InDocker         bool
-	Debug            bool
 	DevReusableToken bool
 }
 
@@ -165,16 +166,23 @@ func parseInDocker(getenv func(string) string) (bool, error) {
 	return parsed, nil
 }
 
-func parseDebug(getenv func(string) string) (bool, error) {
-	val := getenv("ABSTP_DEBUG")
+func parseLogLevel(getenv func(string) string) (slog.Level, error) {
+	val := strings.TrimSpace(getenv("ABSTP_LOG_LEVEL"))
 	if val == "" {
-		return false, nil
+		return slog.LevelInfo, nil
 	}
-	parsed, err := strconv.ParseBool(val)
-	if err != nil {
-		return false, fmt.Errorf("invalid ABSTP_DEBUG %q: must be a boolean (true/false)", val)
+	switch strings.ToUpper(val) {
+	case "DEBUG":
+		return slog.LevelDebug, nil
+	case "INFO":
+		return slog.LevelInfo, nil
+	case "WARN", "WARNING":
+		return slog.LevelWarn, nil
+	case "ERROR":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("invalid ABSTP_LOG_LEVEL %q: must be one of DEBUG, INFO, WARN, ERROR", val)
 	}
-	return parsed, nil
 }
 
 func parseDevReusableToken(getenv func(string) string) (bool, error) {
@@ -229,8 +237,8 @@ func parseCoreSettings(getenv func(string) string) (absURL, listenAddr, external
 	return absURL, listenAddr, externalURL, nil
 }
 
-func parseSecretKeys(getenv func(string) string) (absToken, apiKey string, err error) {
-	absToken, err = parseSecret(getenv, "ABSTP_ABS_TOKEN", "ABSTP_ABS_TOKEN_FILE", "/run/secrets/abstp_abs_token")
+func parseSecretKeys(getenv func(string) string) (absAPIKey, apiKey string, err error) {
+	absAPIKey, err = parseSecret(getenv, "ABSTP_ABS_API_KEY", "ABSTP_ABS_API_KEY_FILE", "/run/secrets/abstp_abs_api_key")
 	if err != nil {
 		return "", "", err
 	}
@@ -238,7 +246,7 @@ func parseSecretKeys(getenv func(string) string) (absToken, apiKey string, err e
 	if err != nil {
 		return "", "", err
 	}
-	return absToken, apiKey, nil
+	return absAPIKey, apiKey, nil
 }
 
 func parseLimits(getenv func(string) string) (tokenTTL, bufferDuration time.Duration, maxConns, maxStreams int, err error) {
@@ -261,23 +269,23 @@ func parseLimits(getenv func(string) string) (tokenTTL, bufferDuration time.Dura
 	return tokenTTL, bufferDuration, maxConns, maxStreams, nil
 }
 
-func parseFlags(getenv func(string) string, version string) (inDocker, debug, devReusableToken bool, err error) {
+func parseFlags(getenv func(string) string, version string) (inDocker bool, logLevel slog.Level, devReusableToken bool, err error) {
 	inDocker, err = parseInDocker(getenv)
 	if err != nil {
-		return false, false, false, err
+		return false, slog.LevelInfo, false, err
 	}
-	debug, err = parseDebug(getenv)
+	logLevel, err = parseLogLevel(getenv)
 	if err != nil {
-		return false, false, false, err
+		return false, slog.LevelInfo, false, err
 	}
 	devReusableToken, err = parseDevReusableToken(getenv)
 	if err != nil {
-		return false, false, false, err
+		return false, slog.LevelInfo, false, err
 	}
 	if devReusableToken && version != "dev" {
-		return false, false, false, errors.New("ABSTP_DEV_REUSABLE_TOKEN is only permitted in dev builds")
+		return false, slog.LevelInfo, false, errors.New("ABSTP_DEV_REUSABLE_TOKEN is only permitted in dev builds")
 	}
-	return inDocker, debug, devReusableToken, nil
+	return inDocker, logLevel, devReusableToken, nil
 }
 
 // Load reads and validates configuration values from the given environment getter function.
@@ -287,7 +295,7 @@ func Load(getenv func(string) string, lookPath func(string) (string, error), ver
 		return Config{}, err
 	}
 
-	absToken, apiKey, err := parseSecretKeys(getenv)
+	absAPIKey, apiKey, err := parseSecretKeys(getenv)
 	if err != nil {
 		return Config{}, err
 	}
@@ -302,14 +310,14 @@ func Load(getenv func(string) string, lookPath func(string) (string, error), ver
 		return Config{}, err
 	}
 
-	inDocker, debug, devReusableToken, err := parseFlags(getenv, version)
+	inDocker, logLevel, devReusableToken, err := parseFlags(getenv, version)
 	if err != nil {
 		return Config{}, err
 	}
 
 	return Config{
 		ABSURL:           absURL,
-		ABSToken:         absToken,
+		ABSAPIKey:        absAPIKey,
 		APIKey:           apiKey,
 		ListenAddr:       listenAddr,
 		ExternalURL:      externalURL,
@@ -319,7 +327,7 @@ func Load(getenv func(string) string, lookPath func(string) (string, error), ver
 		MaxConns:         maxConns,
 		MaxStreams:       maxStreams,
 		InDocker:         inDocker,
-		Debug:            debug,
+		LogLevel:         logLevel,
 		DevReusableToken: devReusableToken,
 	}, nil
 }

@@ -17,17 +17,17 @@ type secretTestCase struct {
 	defaultPath string
 	fileData    string
 	defaultData string
-	isToken     bool
+	isABSKey    bool
 }
 
 var secretCases = []secretTestCase{
 	{
-		envVar:      "ABSTP_ABS_TOKEN",
-		fileVar:     "ABSTP_ABS_TOKEN_FILE",
-		defaultPath: "/run/secrets/abstp_abs_token",
+		envVar:      "ABSTP_ABS_API_KEY",
+		fileVar:     "ABSTP_ABS_API_KEY_FILE",
+		defaultPath: "/run/secrets/abstp_abs_api_key",
 		fileData:    "custom_file_content_alpha",
 		defaultData: "default_path_content_alpha",
-		isToken:     true,
+		isABSKey:    true,
 	},
 	{
 		envVar:      "ABSTP_API_KEY",
@@ -35,7 +35,7 @@ var secretCases = []secretTestCase{
 		defaultPath: "/run/secrets/abstp_api_key",
 		fileData:    "custom_file_content_beta",
 		defaultData: "default_path_content_beta",
-		isToken:     false,
+		isABSKey:    false,
 	},
 }
 
@@ -79,8 +79,8 @@ func TestLoad_SecretsFromFile(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			val := cfg.APIKey
-			if sc.isToken {
-				val = cfg.ABSToken
+			if sc.isABSKey {
+				val = cfg.ABSAPIKey
 			}
 			if val != sc.fileData {
 				t.Errorf("expected %q, got %q", sc.fileData, val)
@@ -117,8 +117,8 @@ func TestLoad_SecretsFromDefaultPath(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			val := cfg.APIKey
-			if sc.isToken {
-				val = cfg.ABSToken
+			if sc.isABSKey {
+				val = cfg.ABSAPIKey
 			}
 			if val != sc.defaultData {
 				t.Errorf("expected %q, got %q", sc.defaultData, val)

@@ -2,13 +2,14 @@ package config
 
 import (
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 )
 
 var defaultEnvMap = map[string]string{
 	"ABSTP_ABS_URL":      "http://abs.example.com:13378",
-	"ABSTP_ABS_TOKEN":    "sample_abs_token",
+	"ABSTP_ABS_API_KEY":  "sample_abs_api_key",
 	"ABSTP_API_KEY":      "sample_api_key",
 	"ABSTP_LISTEN_ADDR":  "127.0.0.1:8100",
 	"ABSTP_EXTERNAL_URL": "http://proxy.example.org:8099",
@@ -48,7 +49,7 @@ func TestLoad_Success(t *testing.T) {
 		desc string
 	}{
 		{got: cfg.ABSURL, want: "http://abs.example.com:13378", desc: "abs url"},
-		{got: cfg.ABSToken, want: "sample_abs_token", desc: "abs token"},
+		{got: cfg.ABSAPIKey, want: "sample_abs_api_key", desc: "abs api key"},
 		{got: cfg.APIKey, want: "sample_api_key", desc: "api key"},
 		{got: cfg.ListenAddr, want: "127.0.0.1:8100", desc: "listen addr"},
 		{got: cfg.ExternalURL, want: "http://proxy.example.org:8099", desc: "external url"},
@@ -199,13 +200,47 @@ func TestLoad_CustomOptions(t *testing.T) {
 	}
 }
 
-func TestLoad_DebugAndReusableToken(t *testing.T) {
+func TestLoad_LogLevel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rawLevel string
+		expected slog.Level
+	}{
+		{name: "default when empty", rawLevel: "", expected: slog.LevelInfo},
+		{name: "debug level", rawLevel: "debug", expected: slog.LevelDebug},
+		{name: "info level", rawLevel: "INFO", expected: slog.LevelInfo},
+		{name: "warn level", rawLevel: "warn", expected: slog.LevelWarn},
+		{name: "warning level", rawLevel: "WARNING", expected: slog.LevelWarn},
+		{name: "error level", rawLevel: "error", expected: slog.LevelError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := func(key string) string {
+				if key == "ABSTP_LOG_LEVEL" {
+					return tt.rawLevel
+				}
+				return mockEnvValue("", "", key)
+			}
+			cfg, err := Load(env, mockLookPathSuccess, "dev")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.LogLevel != tt.expected {
+				t.Errorf("expected LogLevel %v, got %v", tt.expected, cfg.LogLevel)
+			}
+		})
+	}
+}
+
+func TestLoad_DevReusableToken(t *testing.T) {
 	t.Parallel()
 
 	env := func(key string) string {
 		switch key {
-		case "ABSTP_DEBUG":
-			return "true"
 		case "ABSTP_DEV_REUSABLE_TOKEN":
 			return "true"
 		default:
@@ -216,9 +251,6 @@ func TestLoad_DebugAndReusableToken(t *testing.T) {
 	cfg, err := Load(env, mockLookPathSuccess, "dev")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.Debug {
-		t.Errorf("expected Debug true, got false")
 	}
 	if !cfg.DevReusableToken {
 		t.Errorf("expected DevReusableToken true, got false")

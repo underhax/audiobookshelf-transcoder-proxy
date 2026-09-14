@@ -46,7 +46,7 @@ func newTestEnv(t *testing.T, roundTrip roundTripFunc) (*Handler, *session.Store
 
 	cfg := &config.Config{
 		ABSURL:         "http://abs.example.org:13378",
-		ABSToken:       "abs-secret-token",
+		ABSAPIKey:      "abs-secret-token",
 		APIKey:         "proxy-secret-key",
 		ListenAddr:     "127.0.0.1:8099",
 		ExternalURL:    "http://proxy.example.org:8099",
@@ -55,8 +55,8 @@ func newTestEnv(t *testing.T, roundTrip roundTripFunc) (*Handler, *session.Store
 	}
 
 	store := session.NewStore(30 * time.Second)
-	absCli := absclient.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", newTestClient(roundTrip))
-	tp := trackproxy.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", cfg.Debug)
+	absCli := absclient.New(cfg.ABSURL, cfg.ABSAPIKey, "1.0.0", newTestClient(roundTrip))
+	tp := trackproxy.New(cfg.ABSURL, cfg.ABSAPIKey, "1.0.0")
 	h := NewHandler(cfg, store, absCli, tp)
 
 	return h, store
@@ -388,7 +388,7 @@ func TestSessionStart_DynamicExternalURL(t *testing.T) {
 
 			cfg := &config.Config{
 				ABSURL:         "http://abs.example.org:13378",
-				ABSToken:       "abs-secret-token",
+				ABSAPIKey:      "abs-secret-token",
 				APIKey:         "proxy-secret-key",
 				ListenAddr:     "127.0.0.1:8099",
 				ExternalURL:    "",
@@ -406,7 +406,7 @@ func TestSessionStart_DynamicExternalURL(t *testing.T) {
 					}`)),
 				}, nil
 			}
-			absCli := absclient.New(cfg.ABSURL, cfg.ABSToken, "1.0.0", newTestClient(roundTrip))
+			absCli := absclient.New(cfg.ABSURL, cfg.ABSAPIKey, "1.0.0", newTestClient(roundTrip))
 			h := NewHandler(cfg, store, absCli, nil)
 			routes := h.Routes()
 

@@ -125,7 +125,7 @@ func TestLoad_BooleanValidation(t *testing.T) {
 		val    string
 	}{
 		{name: "invalid in docker", envKey: "ABSTP_IN_DOCKER", val: "bad-bool-1"},
-		{name: "invalid debug", envKey: "ABSTP_DEBUG", val: "bad-bool-2"},
+		{name: "invalid log level", envKey: "ABSTP_LOG_LEVEL", val: "UNKNOWN_LEVEL"},
 		{name: "invalid dev reusable", envKey: "ABSTP_DEV_REUSABLE_TOKEN", val: "bad-bool-3"},
 	}
 

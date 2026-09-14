@@ -33,7 +33,8 @@ Audiobookshelf Transcoder Proxy resolves the problems listed above.
 - **Audio Concat**: Seamless multi-track transcoding into a single continuous stream without pauses.
 - **Single-Use Tokens**: Cryptographically secure stream URLs invalidated upon connection.
 - **Smart Buffering**: Instant initial audio burst followed by paced rate-limited streaming.
-- **Progress Sync**: Accurate real-time listening progress tracking adjusted for playback speed.
+- **Resilient Audio Pipeline**: Internal loopback fetching with automatic range-request retries, connection pooling, and read-ahead buffering to prevent stream stalls and isolate credentials.
+- **Progress Sync**: Accurate real-time listening progress tracking adjusted for playback speed, with automatic completion snapping when finished.
 - **Metadata Proxy**: REST endpoints for browsing books, podcasts, and cached cover artwork.
 - **Built-in Security**: Single-use stream tokens, automated CSP/security headers, concurrency limits, timing-attack resistant auth, path traversal guards, and more.
 - **Hardened Container**: Non-root Docker image with a read-only filesystem, dropped capabilities, and privilege escalation protection.
@@ -60,8 +61,8 @@ You can deploy `abstp` using Docker Compose. A production-ready `docker-compose.
    ```bash
    mkdir -p "${BASE_DIR}/secrets"
 
-   # Paste your Audiobookshelf user API token:
-   nano "${BASE_DIR}/secrets/abstp_abs_token.txt"
+   # Paste your Audiobookshelf user API key:
+   nano "${BASE_DIR}/secrets/abstp_abs_api_key.txt"
 
    # Generate a strong secret key for proxy authentication:
    pwgen -s 64 1 > "${BASE_DIR}/secrets/abstp_api_key.txt"
@@ -110,7 +111,7 @@ docker run -d \
   --cap-drop ALL \
   --read-only \
   --tmpfs /tmp:mode=1777,noexec,nosuid \
-  -v "${BASE_DIR}/secrets/abstp_abs_token.txt:/run/secrets/abstp_abs_token:ro" \
+  -v "${BASE_DIR}/secrets/abstp_abs_api_key.txt:/run/secrets/abstp_abs_api_key:ro" \
   -v "${BASE_DIR}/secrets/abstp_api_key.txt:/run/secrets/abstp_api_key:ro" \
   -e ABSTP_ABS_URL="https://abs.example.org" \
   ghcr.io/underhax/audiobookshelf-transcoder-proxy:latest
@@ -201,7 +202,7 @@ server {
 4. Run the application:
    ```bash
    ABSTP_ABS_URL="https://abs.example.org" \
-   ABSTP_ABS_TOKEN_FILE="/path/to/abs_token.txt" \
+   ABSTP_ABS_API_KEY_FILE="/path/to/abs_api_key.txt" \
    ABSTP_API_KEY_FILE="/path/to/api_key.txt" \
    ./abstp
    ```
@@ -230,8 +231,8 @@ Audiobookshelf Transcoder Proxy provides built-in CLI commands and options for m
 `abstp` is configured using the following environment variables:
 
 - `ABSTP_ABS_URL`: **(Required)** Base URL of your Audiobookshelf server (e.g. `https://abs.example.org` or `http://192.168.1.100:13378`).
-- `ABSTP_ABS_TOKEN`: **(Required)** Audiobookshelf user API token or bearer token (or provide via `ABSTP_ABS_TOKEN_FILE`).
-- `ABSTP_ABS_TOKEN_FILE`: Path to a file containing the Audiobookshelf token (supports Docker / Kubernetes Secrets or default `/run/secrets/abstp_abs_token`).
+- `ABSTP_ABS_API_KEY`: **(Required)** Audiobookshelf user API key or bearer token (or provide via `ABSTP_ABS_API_KEY_FILE`).
+- `ABSTP_ABS_API_KEY_FILE`: Path to a file containing the Audiobookshelf API key (supports Docker / Kubernetes Secrets or default `/run/secrets/abstp_abs_api_key`).
 - `ABSTP_API_KEY`: **(Required)** Secret Bearer key required by clients to authenticate requests against this proxy (or provide via `ABSTP_API_KEY_FILE`).
 - `ABSTP_API_KEY_FILE`: Path to a file containing the proxy authentication secret key (supports Docker / Kubernetes Secrets or default `/run/secrets/abstp_api_key`).
 - `ABSTP_LISTEN_ADDR`: Server listen address and port in `host:port` format (default: `127.0.0.1:8099`). For security reasons, the port must be within `1025` to `65535`. *(Note: When using Docker, set to `0.0.0.0:8099`)*.
@@ -241,6 +242,7 @@ Audiobookshelf Transcoder Proxy provides built-in CLI commands and options for m
 - `ABSTP_BUFFER_DURATION`: Initial stream burst buffer duration sent immediately to prime client buffers (default: `10s`, minimum: `5s`).
 - `ABSTP_MAX_CONNS`: Global maximum concurrent incoming HTTP connections (default: `100`, allowed: `50` to `1000`).
 - `ABSTP_MAX_STREAMS`: Maximum concurrent active FFmpeg transcoding streams (default: `5`, allowed: `1` to `20`).
+- `ABSTP_LOG_LEVEL`: Logging verbosity level (`DEBUG`, `INFO`, `WARN`, `ERROR`, default: `INFO` for standalone binary, `ERROR` for Docker compose).
 - `ABSTP_IN_DOCKER`: Set to `true` when running in Docker to suppress terminal interactivity messages (default: `false`).
 
 <details>
@@ -249,7 +251,7 @@ Audiobookshelf Transcoder Proxy provides built-in CLI commands and options for m
 **1. Basic local execution with secret files:**
 ```bash
 ABSTP_ABS_URL="https://abs.example.org" \
-ABSTP_ABS_TOKEN_FILE="/path/to/abs_token.txt" \
+ABSTP_ABS_API_KEY_FILE="/path/to/abs_api_key.txt" \
 ABSTP_API_KEY_FILE="/path/to/api_key.txt" \
 ./abstp
 ```
@@ -257,7 +259,7 @@ ABSTP_API_KEY_FILE="/path/to/api_key.txt" \
 **2. Custom port, external network URL, and custom buffer duration:**
 ```bash
 ABSTP_ABS_URL="https://abs.example.org" \
-ABSTP_ABS_TOKEN_FILE="/path/to/abs_token.txt" \
+ABSTP_ABS_API_KEY_FILE="/path/to/abs_api_key.txt" \
 ABSTP_API_KEY_FILE="/path/to/api_key.txt" \
 ABSTP_LISTEN_ADDR="0.0.0.0:9099" \
 ABSTP_EXTERNAL_URL="http://192.168.1.50:9099" \

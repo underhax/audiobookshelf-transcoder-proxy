@@ -125,8 +125,8 @@ Configure the environment variables in your terminal before launching `abstp`:
 # 1. Target Audiobookshelf instance (without trailing slash)
 ABSTP_ABS_URL="https://abs.example.org"
 
-# 2. Audiobookshelf API token
-ABSTP_ABS_TOKEN="your_abs_token_here"
+# 2. Audiobookshelf API key
+ABSTP_ABS_API_KEY="your_abs_api_key_here"
 
 # 3. Secret API key used by Home Assistant / clients to access this proxy
 ABSTP_API_KEY="your_proxy_secret_key_here"
@@ -148,6 +148,9 @@ ABSTP_IN_DOCKER="false"
 
 # 9. Local proxy base URL for testing commands
 ABSTP_PROXY_URL="http://127.0.0.1:8099"
+
+# 10. Logging level (default: INFO, options: DEBUG, INFO, WARN, ERROR)
+ABSTP_LOG_LEVEL="DEBUG"
 ```
 
 ---
@@ -160,8 +163,9 @@ Launch `abstp` in your first terminal (passing variables or using your configura
 
 ```bash
 ABSTP_ABS_URL="${ABSTP_ABS_URL}" \
-ABSTP_ABS_TOKEN="${ABSTP_ABS_TOKEN}" \
+ABSTP_ABS_API_KEY="${ABSTP_ABS_API_KEY}" \
 ABSTP_API_KEY="${ABSTP_API_KEY}" \
+ABSTP_LOG_LEVEL="DEBUG" \
 ./abstp
 ```
 

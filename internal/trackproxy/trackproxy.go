@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -50,16 +50,14 @@ type Server struct {
 	spoolBytes         int
 	minHealthyBytes    int
 	port               int
-	debug              bool
 }
 
 // New constructs a Server configured with dedicated upstream HTTP transport settings and exponential backoff intervals.
-func New(absURL, token, version string, debug bool) *Server {
+func New(absURL, token, version string) *Server {
 	return &Server{
 		absURL:  absURL,
 		token:   token,
 		version: version,
-		debug:   debug,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 15 * time.Second}).DialContext,
@@ -67,6 +65,7 @@ func New(absURL, token, version string, debug bool) *Server {
 				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConns:        20,
 				MaxIdleConnsPerHost: 10,
+				ForceAttemptHTTP2:   true,
 			},
 		},
 		retryDelays: []time.Duration{
@@ -160,7 +159,7 @@ func (s *Server) Start() (int, error) {
 	tcpAddr, ok := ln.Addr().(*net.TCPAddr)
 	if !ok {
 		if closeErr := ln.Close(); closeErr != nil {
-			log.Printf("close loopback listener error: %v", closeErr)
+			slog.Debug("close loopback listener error", "error", closeErr)
 		}
 		return 0, errors.New("failed to cast loopback listener address to TCPAddr")
 	}
@@ -177,7 +176,7 @@ func (s *Server) Start() (int, error) {
 
 	go func() {
 		if serveErr := s.server.Serve(ln); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			log.Printf("trackproxy serve error: %v", serveErr)
+			slog.Error("trackproxy serve error", "error", serveErr)
 		}
 	}()
 
@@ -349,9 +348,14 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session_id")
 	trackIdxStr := r.PathValue("track_index")
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: %s /track/%s/%s from %s, Range=%q, UA=%q", r.Method, sessionID, trackIdxStr, r.RemoteAddr, r.Header.Get("Range"), r.UserAgent()), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy incoming request",
+		"method", r.Method,
+		"session_id", sessionID,
+		"track_index", trackIdxStr,
+		"remote_addr", r.RemoteAddr,
+		"range", r.Header.Get("Range"),
+		"user_agent", r.UserAgent(),
+	)
 
 	state, status, errMsg := s.getActiveSession(r, sessionID)
 	if status != 0 {
@@ -365,9 +369,10 @@ func (s *Server) handleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: resolved upstream URL %s for track index %s", upstreamURL, trackIdxStr), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy resolved upstream URL",
+		"upstream_url", upstreamURL,
+		"track_index", trackIdxStr,
+	)
 
 	initRange := parseRange(r.Header.Get("Range"))
 	s.proxyWithRetry(r.Context(), w, upstreamURL, initRange, &state.lastActivity)
@@ -418,18 +423,14 @@ func (s *Server) newUpstreamRequest(ctx context.Context, targetURL string, curre
 func (s *Server) commitInitialHeaders(w http.ResponseWriter, resp *http.Response, flusher http.Flusher, bytesWritten *int64, headersSent *bool, lastActivity *atomic.Int64) (committed, completed bool, spooledBytes int64, err error) {
 	spooled, eof, spoolErr := readSpool(resp.Body, s.spoolBytes)
 	if spoolErr != nil {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream spool read failed: %v", spoolErr), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: upstream spool read failed", "error", spoolErr)
 		return false, false, 0, nil
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: spool read: bytes=%d, eof=%v, contentLength=%d", len(spooled), eof, resp.ContentLength), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: spool read", "bytes", len(spooled), "eof", eof, "content_length", resp.ContentLength)
 
 	if eof && (resp.ContentLength < 0 || int64(len(spooled)) == resp.ContentLength) {
-		if s.debug {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll("[DEBUG] trackproxy: full body captured during spool, committing response", "\n", " "), "\r", ""))
-		}
+		slog.Debug("trackproxy: full body captured during spool, committing response")
 		forwardHeaders(w, resp)
 		w.WriteHeader(resp.StatusCode)
 		*headersSent = true
@@ -440,13 +441,11 @@ func (s *Server) commitInitialHeaders(w http.ResponseWriter, resp *http.Response
 	}
 
 	if eof {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream stream ended at %d bytes, expected %d, retrying without commit", len(spooled), resp.ContentLength), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: upstream stream ended early during spool", "bytes", len(spooled), "expected", resp.ContentLength)
 		return false, false, int64(len(spooled)), nil
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: partial spool captured %d bytes, committing headers and streaming remainder", len(spooled)), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: partial spool captured bytes, committing headers and streaming remainder", "bytes", len(spooled))
 	forwardHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	*headersSent = true
@@ -474,25 +473,26 @@ func waitRetryDelay(ctx context.Context, delay time.Duration) bool {
 
 func (s *Server) handleRetryFailure(ctx context.Context, consecutiveFailures *int, bytesTransferred int64) bool {
 	if *consecutiveFailures >= len(s.retryDelays) {
-		if s.debug {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: max retry attempts (%d) reached without progress, aborting", len(s.retryDelays)), "\n", " "), "\r", ""))
-		}
+		slog.Warn("trackproxy: max retry attempts reached without progress", "attempts", len(s.retryDelays))
 		return false
 	}
 
 	delay := s.retryDelays[*consecutiveFailures]
 	*consecutiveFailures++
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: retry %d/%d after %v delay (bytes written: %d)", *consecutiveFailures, len(s.retryDelays), delay, bytesTransferred), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: retry scheduled",
+		"attempt", *consecutiveFailures,
+		"max_attempts", len(s.retryDelays),
+		"delay", delay,
+		"bytes_written", bytesTransferred,
+	)
 
 	return waitRetryDelay(ctx, delay)
 }
 
 func closeBody(body io.Closer) {
 	if err := body.Close(); err != nil {
-		log.Printf("close body error: %v", err)
+		slog.Debug("close body error", "error", err)
 	}
 }
 
@@ -512,22 +512,26 @@ func (s *Server) requestInitial(ctx context.Context, upstreamURL string, initRan
 		return nil, fmt.Errorf("create initial upstream request: %w", err)
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: upstream request GET %s range=%q hasBytes=false", req.URL.String(), initRange.raw), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: upstream initial request",
+		"url", req.URL.String(),
+		"range", initRange.raw,
+	)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream request failed: %v", err), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: upstream request failed", "error", err)
 		return nil, fmt.Errorf("do upstream initial: %w", err)
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: upstream response: status=%d, Content-Length=%d, Content-Range=%q, headersSent=%v", resp.StatusCode, resp.ContentLength, resp.Header.Get("Content-Range"), headersSent), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: upstream response",
+		"status", resp.StatusCode,
+		"content_length", resp.ContentLength,
+		"content_range", resp.Header.Get("Content-Range"),
+		"headers_sent", headersSent,
+	)
 
 	if resp.StatusCode >= http.StatusInternalServerError {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream returned server error status %d", resp.StatusCode), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: upstream returned server error status", "status", resp.StatusCode)
 		closeBody(resp.Body)
 		return nil, errors.New("upstream server error")
 	}
@@ -587,9 +591,12 @@ func (s *Server) pumpBodyToBuffer(ctx context.Context, buf *readAheadBuffer, bod
 	attemptStart := *bytesFetched
 	lastLogged := attemptStart
 	tmp := make([]byte, 32*1024)
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: stream start: attemptStart=%d, expectedLength=%d", attemptStart, expectedLength), "\n", " "), "\r", ""))
-	}
+
+	slog.Debug("trackproxy: stream start",
+		"attempt_start", attemptStart,
+		"expected_length", expectedLength,
+	)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -605,32 +612,39 @@ func (s *Server) pumpBodyToBuffer(ctx context.Context, buf *readAheadBuffer, bod
 				return false, writeErr
 			}
 		}
-		if s.debug && nr > 0 && *bytesFetched-lastLogged >= progressLogInterval {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: stream progress: attemptBytes=%d, totalBytes=%d", *bytesFetched-attemptStart, *bytesFetched), "\n", " "), "\r", ""))
+		if nr > 0 && *bytesFetched-lastLogged >= progressLogInterval {
+			slog.Debug("trackproxy: stream progress",
+				"attempt_bytes", *bytesFetched-attemptStart,
+				"total_bytes", *bytesFetched,
+			)
 			lastLogged = *bytesFetched
 		}
 		if readErr == nil {
 			continue
 		}
 		if !errors.Is(readErr, io.EOF) {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream stream read error: %v", readErr), "\n", " "), "\r", ""))
+			slog.Warn("trackproxy: upstream stream read error", "error", readErr)
 			return false, nil
 		}
 		if expectedLength >= 0 && *bytesFetched-attemptStart != expectedLength {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream stream ended at %d bytes, expected %d", *bytesFetched-attemptStart, expectedLength), "\n", " "), "\r", ""))
+			slog.Warn("trackproxy: upstream stream ended early",
+				"bytes", *bytesFetched-attemptStart,
+				"expected", expectedLength,
+			)
 			return false, nil
 		}
-		if s.debug {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: stream complete: attemptBytes=%d, expectedLength=%d", *bytesFetched-attemptStart, expectedLength), "\n", " "), "\r", ""))
-		}
+		slog.Debug("trackproxy: stream complete",
+			"attempt_bytes", *bytesFetched-attemptStart,
+			"expected_length", expectedLength,
+		)
 		return true, nil
 	}
 }
 
 func (s *Server) resumeUpstream(ctx context.Context, upstreamURL string, initRange rangeHeader, bytesFetched int64) (io.ReadCloser, int64, error) {
 	currentStart := initRange.start + bytesFetched
-	if s.debug && bytesFetched > 0 {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: resuming upstream stream from byte offset %d", currentStart), "\n", " "), "\r", ""))
+	if bytesFetched > 0 {
+		slog.Debug("trackproxy: resuming upstream stream", "offset", currentStart)
 	}
 
 	req, err := s.newUpstreamRequest(ctx, upstreamURL, currentStart, initRange, bytesFetched > 0)
@@ -638,22 +652,26 @@ func (s *Server) resumeUpstream(ctx context.Context, upstreamURL string, initRan
 		return nil, 0, fmt.Errorf("create resume request: %w", err)
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: upstream request GET %s range=%q hasBytes=%v", req.URL.String(), initRange.raw, bytesFetched > 0), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: resume upstream request",
+		"url", req.URL.String(),
+		"range", initRange.raw,
+		"has_bytes", bytesFetched > 0,
+	)
 
 	newResp, err := s.httpClient.Do(req)
 	if err != nil {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream request failed: %v", err), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: resume upstream request failed", "error", err)
 		return nil, 0, fmt.Errorf("do upstream resume: %w", err)
 	}
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: upstream response: status=%d, Content-Length=%d, Content-Range=%q, headersSent=true", newResp.StatusCode, newResp.ContentLength, newResp.Header.Get("Content-Range")), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: resume upstream response",
+		"status", newResp.StatusCode,
+		"content_length", newResp.ContentLength,
+		"content_range", newResp.Header.Get("Content-Range"),
+	)
 
 	if newResp.StatusCode != http.StatusPartialContent {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[WARN] trackproxy: upstream returned status %d on resume (expected 206 Partial Content)", newResp.StatusCode), "\n", " "), "\r", ""))
+		slog.Warn("trackproxy: upstream returned unexpected status on resume", "status", newResp.StatusCode)
 		closeBody(newResp.Body)
 		return nil, 0, errors.New("upstream resume not partial content")
 	}
@@ -666,9 +684,11 @@ func (s *Server) pumpStream(ctx context.Context, buf *readAheadBuffer, body io.R
 	completed, fetchErr := s.pumpBodyToBuffer(ctx, buf, body, bytesFetched, expectedLength)
 	closeBody(body)
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: attempt finished: completed=%v, clientErr=%v, bytesWritten=%d", completed, fetchErr, *bytesFetched), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: attempt finished",
+		"completed", completed,
+		"error", fetchErr,
+		"bytes_fetched", *bytesFetched,
+	)
 
 	if completed {
 		buf.CloseWithError(io.EOF)
@@ -745,13 +765,12 @@ func (s *Server) proxyWithRetry(ctx context.Context, w http.ResponseWriter, upst
 	var bytesWritten int64
 	headersSent := false
 
-	if s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: proxy start: range=%q", initRange.raw), "\n", " "), "\r", ""))
-	}
+	slog.Debug("trackproxy: proxy start", "range", initRange.raw)
 	defer func() {
-		if s.debug {
-			log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: proxy end: bytesWritten=%d, headersSent=%v", bytesWritten, headersSent), "\n", " "), "\r", ""))
-		}
+		slog.Debug("trackproxy: proxy end",
+			"bytes_written", bytesWritten,
+			"headers_sent", headersSent,
+		)
 	}()
 
 	attemptStart := time.Now()
@@ -774,8 +793,8 @@ func (s *Server) proxyWithRetry(ctx context.Context, w http.ResponseWriter, upst
 		s.fetchToBuffer(fetchCtx, buf, upstreamURL, initRange, body, expectedLen, bytesWritten, attemptStart)
 	}()
 
-	if streamErr := s.streamFromBuffer(ctx, w, buf, flusher, &bytesWritten, lastActivity); streamErr != nil && s.debug {
-		log.Println(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] trackproxy: stream error: %v", streamErr), "\n", " "), "\r", ""))
+	if streamErr := s.streamFromBuffer(ctx, w, buf, flusher, &bytesWritten, lastActivity); streamErr != nil {
+		slog.Debug("trackproxy: stream playback error", "error", streamErr)
 	}
 	buf.CloseWithError(errBufferClosed)
 	fetchCancel()

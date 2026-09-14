@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -74,7 +75,7 @@ func defaultHealthcheck(ctx context.Context, listenAddr string, client *http.Cli
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("close healthcheck body: %v", closeErr)
+			slog.Debug("close healthcheck body error", "error", closeErr)
 		}
 	}()
 
@@ -100,8 +101,8 @@ func printHelp(out io.Writer) {
 		"      --healthcheck      Perform liveness probe against running instance and exit\n\n" +
 		"Environment Variables:\n" +
 		"  ABSTP_ABS_URL          Audiobookshelf base URL (required, e.g. https://abs.example.org)\n" +
-		"  ABSTP_ABS_TOKEN        Audiobookshelf user/API token (required, or ABSTP_ABS_TOKEN_FILE)\n" +
-		"  ABSTP_ABS_TOKEN_FILE   Path to file containing Audiobookshelf token\n" +
+		"  ABSTP_ABS_API_KEY      Audiobookshelf user/API key (required, or ABSTP_ABS_API_KEY_FILE)\n" +
+		"  ABSTP_ABS_API_KEY_FILE Path to file containing Audiobookshelf API key\n" +
 		"  ABSTP_API_KEY          Proxy authentication secret key (required, or ABSTP_API_KEY_FILE)\n" +
 		"  ABSTP_API_KEY_FILE     Path to file containing proxy authentication secret key\n" +
 		"  ABSTP_LISTEN_ADDR      Server listen address (default: 127.0.0.1:8099)\n" +
@@ -111,9 +112,10 @@ func printHelp(out io.Writer) {
 		"  ABSTP_BUFFER_DURATION  Initial stream buffer duration (default: 10s)\n" +
 		"  ABSTP_MAX_CONNS        Max concurrent incoming HTTP connections (default: 100)\n" +
 		"  ABSTP_MAX_STREAMS      Max concurrent active transcoding streams (default: 5)\n" +
+		"  ABSTP_LOG_LEVEL        Logging level: DEBUG, INFO, WARN, ERROR (default: INFO)\n" +
 		"  ABSTP_IN_DOCKER        Running inside Docker container (true/false, default: false)\n"
 	if _, err := io.WriteString(out, text); err != nil {
-		log.Printf("write help error: %v", err)
+		slog.Error("write help error", "error", err)
 	}
 }
 
@@ -128,7 +130,7 @@ func checkCommands(args []string, out io.Writer) bool {
 		return true
 	case "version", "-v", "--version", "-version":
 		if _, err := fmt.Fprintf(out, "abstp version %s\n", Version); err != nil {
-			log.Printf("write version error: %v", err)
+			slog.Error("write version error", "error", err)
 		}
 		return true
 	default:
@@ -155,6 +157,10 @@ func run(args []string, getenv func(string) string, sigs ...os.Signal) error {
 		return fmt.Errorf("%w", err)
 	}
 
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: cfg.LogLevel,
+	})))
+
 	if *healthcheckFlag {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -163,28 +169,28 @@ func run(args []string, getenv func(string) string, sigs ...os.Signal) error {
 			return fmt.Errorf("healthcheck failed: %w", hcErr)
 		}
 		if _, hcPrintErr := fmt.Fprintln(stdout, "healthcheck ok"); hcPrintErr != nil {
-			log.Printf("write healthcheck ok error: %v", hcPrintErr)
+			slog.Error("write healthcheck ok error", "error", hcPrintErr)
 		}
 		return nil
 	}
 
-	absCli := absclient.New(cfg.ABSURL, cfg.ABSToken, Version, http.DefaultClient)
+	absCli := absclient.New(cfg.ABSURL, cfg.ABSAPIKey, Version, http.DefaultClient)
 	detectCtx, detectCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	cfg.ABSURL = absCli.DetectBaseURL(detectCtx)
 	detectCancel()
-	log.Printf("Target Audiobookshelf URL: %s", cfg.ABSURL)
+	slog.Info("target audiobookshelf url", "url", cfg.ABSURL)
 
-	trackProxy := trackproxy.New(cfg.ABSURL, cfg.ABSToken, Version, cfg.Debug)
+	trackProxy := trackproxy.New(cfg.ABSURL, cfg.ABSAPIKey, Version)
 	proxyPort, err := startTrackProxy(trackProxy)
 	if err != nil {
 		return fmt.Errorf("start track proxy: %w", err)
 	}
-	log.Printf("Internal track proxy listening on 127.0.0.1:%d", proxyPort)
+	slog.Info("internal track proxy listening", "port", proxyPort)
 	defer func() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutCancel()
 		if shutErr := shutdownTrackProxy(shutCtx, trackProxy); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
-			log.Printf("shutdown track proxy error: %v", shutErr)
+			slog.Error("shutdown track proxy error", "error", shutErr)
 		}
 	}()
 
@@ -210,26 +216,23 @@ func run(args []string, getenv func(string) string, sigs ...os.Signal) error {
 	case err := <-serverErr:
 		return err
 	case sig := <-quit:
-		log.Printf("Received signal %s, initiating graceful shutdown...", sig)
+		slog.Info("received signal, initiating graceful shutdown", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		if shutErr := shutdownServer(ctx, server); shutErr != nil {
 			return shutErr
 		}
-		log.Println("abstp stopped gracefully")
+		slog.Info("abstp stopped gracefully")
 		return nil
 	}
 }
 
 func startServer(server *http.Server, cfg *config.Config, serverErr chan<- error) {
 	go func() {
-		log.Printf("Starting abstp on %s (version: %s)", cfg.ListenAddr, Version)
-		if cfg.Debug {
-			log.Println("[INFO] debug logging enabled (ABSTP_DEBUG=true)")
-		}
+		slog.Info("starting abstp", "addr", cfg.ListenAddr, "version", Version)
 		if cfg.DevReusableToken {
-			log.Println("[WARN] dev reusable stream token enabled (ABSTP_DEV_REUSABLE_TOKEN=true)")
+			slog.Warn("dev reusable stream token enabled (ABSTP_DEV_REUSABLE_TOKEN=true)")
 		}
 		if !cfg.InDocker {
 			fmt.Println("Press Ctrl+C to exit")

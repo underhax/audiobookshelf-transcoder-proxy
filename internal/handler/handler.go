@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -133,7 +133,7 @@ func (h *Handler) HandleRoot(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("OK\n")); err != nil {
-		log.Printf("write root response error: %v", err)
+		slog.Error("write root response error", "error", err)
 	}
 }
 
@@ -147,7 +147,7 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
-		log.Printf("write health response error: %v", err)
+		slog.Error("write health response error", "error", err)
 	}
 }
 

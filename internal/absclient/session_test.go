@@ -220,6 +220,25 @@ func TestSyncSession(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:      "retry success after first network error",
+			sessionID: "play_sync_retry_ok",
+			mockFn: func() roundTripFunc {
+				attempts := 0
+				return func(_ *http.Request) (*http.Response, error) {
+					attempts++
+					if attempts == 1 {
+						return nil, errors.New("temporary keepalive eof")
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("")),
+					}, nil
+				}
+			}(),
+			wantErr: false,
+		},
+		{
 			name:      "transport error on sync",
 			sessionID: "play_sync_err",
 			mockFn: func(_ *http.Request) (*http.Response, error) {
@@ -313,6 +332,18 @@ func TestCloseSession(t *testing.T) {
 				return nil, errors.New("network failure")
 			},
 			wantErr: true,
+		},
+		{
+			name:      "status 404 handled gracefully as ok",
+			sessionID: "play_close_404",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("session not found")),
+				}, nil
+			},
+			wantErr: false,
 		},
 		{
 			name:      "status error on close",

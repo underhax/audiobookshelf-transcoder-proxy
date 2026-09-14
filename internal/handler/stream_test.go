@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -234,7 +235,7 @@ func TestStream_DebugAndProbes(t *testing.T) {
 	t.Parallel()
 
 	h, store := newTestEnv(t, nil)
-	h.cfg.Debug = true
+	h.cfg.LogLevel = slog.LevelDebug
 	h.keepaliveInterval = 5 * time.Millisecond
 	h.progressInterval = 5 * time.Millisecond
 
@@ -291,7 +292,7 @@ func TestStream_ProbeZeroBytesSent(t *testing.T) {
 	t.Parallel()
 
 	h, store := newTestEnv(t, nil)
-	h.cfg.Debug = true
+	h.cfg.LogLevel = slog.LevelDebug
 	h.cfg.FFmpegPath = "true"
 
 	sess := &session.Session{
@@ -338,6 +339,133 @@ func TestDisconnectSync_Errors(t *testing.T) {
 	req.SetPathValue("session_id", "sess-disconnect-err.aac")
 	rec := httptest.NewRecorder()
 	h.HandleStream(rec, req)
+}
+
+func TestHandleDisconnectSync_Cases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		syncErr      error
+		name         string
+		initialTime  float64
+		duration     float64
+		speed        float64
+		wantPos      float64
+		isEOF        bool
+		reusable     bool
+		wantSyncDone bool
+	}{
+		{
+			name:         "eof with duration snaps to duration and speed zero normalized",
+			syncErr:      nil,
+			initialTime:  50,
+			duration:     100,
+			speed:        0,
+			wantPos:      100,
+			isEOF:        true,
+			reusable:     false,
+			wantSyncDone: true,
+		},
+		{
+			name:         "eof with zero duration computes played position",
+			syncErr:      nil,
+			initialTime:  50,
+			duration:     0,
+			speed:        1.0,
+			wantPos:      50,
+			isEOF:        true,
+			reusable:     false,
+			wantSyncDone: true,
+		},
+		{
+			name:         "mid stream within threshold snaps to duration",
+			syncErr:      nil,
+			initialTime:  95,
+			duration:     100,
+			speed:        1.0,
+			wantPos:      100,
+			isEOF:        false,
+			reusable:     false,
+			wantSyncDone: true,
+		},
+		{
+			name:         "mid stream normal deduction",
+			syncErr:      nil,
+			initialTime:  10,
+			duration:     100,
+			speed:        1.0,
+			wantPos:      10,
+			isEOF:        false,
+			reusable:     false,
+			wantSyncDone: true,
+		},
+		{
+			name:         "sync error does not advance last sync position",
+			syncErr:      errors.New("sync failed"),
+			initialTime:  50,
+			duration:     100,
+			speed:        1.0,
+			wantPos:      50,
+			isEOF:        true,
+			reusable:     false,
+			wantSyncDone: false,
+		},
+		{
+			name:         "reusable token skips close",
+			syncErr:      nil,
+			initialTime:  50,
+			duration:     100,
+			speed:        1.0,
+			wantPos:      100,
+			isEOF:        true,
+			reusable:     true,
+			wantSyncDone: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h, store := newTestEnv(t, func(req *http.Request) (*http.Response, error) {
+				if strings.Contains(req.URL.Path, "/sync") && tt.syncErr != nil {
+					return nil, tt.syncErr
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{}`)),
+				}, nil
+			})
+			h.cfg.DevReusableToken = tt.reusable
+
+			sess := &session.Session{
+				ID:          "sess-" + tt.name,
+				CurrentTime: tt.initialTime,
+				Duration:    tt.duration,
+				Speed:       tt.speed,
+			}
+			sess.SetLastSyncPosition(tt.initialTime)
+			if _, err := store.Create(sess); err != nil {
+				t.Fatalf("create sess: %v", err)
+			}
+
+			termReason := "client_write_error"
+			if tt.isEOF {
+				termReason = "eof"
+			}
+			h.handleDisconnectSync(context.Background(), sess, termReason)
+
+			if tt.wantSyncDone {
+				if sess.GetLastSyncPosition() != tt.wantPos {
+					t.Errorf("got last sync pos %v, want %v", sess.GetLastSyncPosition(), tt.wantPos)
+				}
+			} else {
+				if sess.GetLastSyncPosition() != tt.initialTime {
+					t.Errorf("expected last sync pos to stay %v, got %v", tt.initialTime, sess.GetLastSyncPosition())
+				}
+			}
+		})
+	}
 }
 
 func TestStream_ICYHeaders(t *testing.T) {
@@ -725,10 +853,9 @@ func TestLogStreamEnd(t *testing.T) {
 	stderrBuf := bytes.NewBufferString("sample error line 1\r\nsample error line 2\n")
 	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "ffmpeg_read_error", stderrBuf)
 
-	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "eof", nil)
-
-	emptyBuf := bytes.NewBuffer(nil)
-	h.logStreamEnd("sess-log-end", sess, 15*time.Second, "eof", emptyBuf)
+	for _, b := range []*bytes.Buffer{nil, bytes.NewBuffer(nil)} {
+		h.logStreamEnd("sess-log-end", sess, 15*time.Second, "eof", b)
+	}
 }
 
 func TestLogStreamProgress_IntervalFallbackAndStop(t *testing.T) {
@@ -799,7 +926,7 @@ func TestDefaultTrackProxyRegisterSession_Error(t *testing.T) {
 	})
 	defer cleanup()
 
-	tp := trackproxy.New("http://test.example.net", "token", "1.0", false)
+	tp := trackproxy.New("http://test.example.net", "token", "1.0")
 	if _, err := defaultTrackProxyRegisterSession(tp, "sess-err", []string{"/unique-err-track.mp3"}); err == nil {
 		t.Error("expected error when token generation fails")
 	}

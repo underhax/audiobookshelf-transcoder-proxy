@@ -28,10 +28,11 @@ services:
         required: false
     environment:
       - ABSTP_ABS_URL=${ABSTP_ABS_URL:-https://abs.example.org}
+      - ABSTP_LOG_LEVEL=${ABSTP_LOG_LEVEL:-DEBUG}
     volumes:
       - /etc/localtime:/etc/localtime:ro
     secrets:
-      - abstp_abs_token
+      - abstp_abs_api_key
       - abstp_api_key
     deploy:
       resources:
@@ -55,8 +56,8 @@ services:
     user: "65534:65534"
 
 secrets:
-  abstp_abs_token:
-    file: ./secrets/abstp_abs_token.txt
+  abstp_abs_api_key:
+    file: ./secrets/abstp_abs_api_key.txt
   abstp_api_key:
     file: ./secrets/abstp_api_key.txt
 

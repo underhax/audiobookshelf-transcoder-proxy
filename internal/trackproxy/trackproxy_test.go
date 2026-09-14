@@ -58,7 +58,7 @@ func (b *blockingReader) Read(_ []byte) (int, error) {
 }
 
 func TestServer_Lifecycle(t *testing.T) {
-	s := New("http://example.com", "secret-token", "1.0.0", false)
+	s := New("http://example.com", "secret-token", "1.0.0")
 	port, err := s.Start()
 	if err != nil {
 		t.Fatalf("Start() returned error: %v", err)
@@ -141,7 +141,7 @@ func TestServer_UserAgent_Whitelist(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New("http://example.com", "token", "1.0.0", false)
+			s := New("http://example.com", "token", "1.0.0")
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/sess/0", http.NoBody)
 			req.Header.Set("User-Agent", tt.userAgent)
 			req.SetPathValue("session_id", "sess")
@@ -157,7 +157,7 @@ func TestServer_UserAgent_Whitelist(t *testing.T) {
 }
 
 func TestServer_Token_Validation(t *testing.T) {
-	s := New("http://example.com", "upstream-token", "1.0.0", false)
+	s := New("http://example.com", "upstream-token", "1.0.0")
 	sessionID := "sess-tok-val"
 	validToken, err := s.RegisterSession(sessionID, []string{"/audio-token-val.mp3"})
 	if err != nil {
@@ -294,7 +294,7 @@ func TestServer_HandleTrack_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New("http://example.com", "token", "1.0.0", false)
+			s := New("http://example.com", "token", "1.0.0")
 			sessionID, token := tt.setup(s)
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/track/"+sessionID+"/"+tt.trackIdx+"?token="+token, http.NoBody)
@@ -313,7 +313,7 @@ func TestServer_HandleTrack_Validation(t *testing.T) {
 }
 
 func TestServer_Idle_Timeout(t *testing.T) {
-	s := New("http://example.com", "token", "1.0.0", false)
+	s := New("http://example.com", "token", "1.0.0")
 	sessionID := "sess-idle"
 	token, err := s.RegisterSession(sessionID, []string{"/audio-idle-timeout.mp3"})
 	if err != nil {
@@ -347,7 +347,7 @@ func TestServer_Idle_Timeout(t *testing.T) {
 }
 
 func TestServer_Concurrency_Parallel(t *testing.T) {
-	s := New("http://example.com", "token", "1.0.0", false)
+	s := New("http://example.com", "token", "1.0.0")
 	holdFirst := make(chan struct{})
 	firstStarted := make(chan struct{})
 	var calls atomic.Int32
@@ -420,7 +420,7 @@ func TestServer_Concurrency_Parallel(t *testing.T) {
 }
 
 func TestServer_Sequential_Requests(t *testing.T) {
-	s := New("http://example.com", "token", "1.0.0", false)
+	s := New("http://example.com", "token", "1.0.0")
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -464,7 +464,7 @@ func TestServer_Proxy_NormalStream(t *testing.T) {
 	token := "valid-bearer-token"
 	version := "2.1.0"
 
-	s := New("http://example.com", token, version, true)
+	s := New("http://example.com", token, version)
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if auth := req.Header.Get("Authorization"); auth != "Bearer "+token {
@@ -511,7 +511,7 @@ func TestServer_Proxy_NormalStream(t *testing.T) {
 }
 
 func TestServer_Proxy_RangeForwarding(t *testing.T) {
-	s := New("http://example.com", "token", "", false)
+	s := New("http://example.com", "token", "")
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			rangeHdr := req.Header.Get("Range")
@@ -579,7 +579,7 @@ func TestServer_Proxy_ResumeAfterUpstreamDrop(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var requestCount atomic.Int32
 
-			s := New("http://example.com", "token", "test", true)
+			s := New("http://example.com", "token", "test")
 			s.spoolBytes = 2
 			s.retryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
 			s.httpClient = &http.Client{
@@ -648,7 +648,7 @@ func TestServer_Proxy_Strict206ValidationOnResume(t *testing.T) {
 	part2 := "resumed-chunk"
 	var attempts atomic.Int32
 
-	s := New("http://example.com", "token", "1.0.0", true)
+	s := New("http://example.com", "token", "1.0.0")
 	s.spoolBytes = 4
 	s.retryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
 	s.httpClient = &http.Client{
@@ -739,7 +739,7 @@ func TestServer_Proxy_ContentLength_Forwarding(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New("http://example.com", "token", "1.0.0", false)
+			s := New("http://example.com", "token", "1.0.0")
 			s.httpClient = &http.Client{
 				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 					resp := &http.Response{
@@ -778,7 +778,7 @@ func TestServer_Proxy_ContentLength_Forwarding(t *testing.T) {
 
 func TestServer_Proxy_RetryExhaustion(t *testing.T) {
 	var attempts atomic.Int32
-	s := New("http://example.com", "token", "test", false)
+	s := New("http://example.com", "token", "test")
 	s.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -815,7 +815,7 @@ func TestServer_Proxy_RetryExhaustion(t *testing.T) {
 
 func TestServer_Proxy_UpstreamNetworkErrorRetry(t *testing.T) {
 	var attempts atomic.Int32
-	s := New("http://example.com", "token", "test", false)
+	s := New("http://example.com", "token", "test")
 	s.retryDelays = []time.Duration{time.Millisecond}
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -855,7 +855,7 @@ func TestServer_Proxy_UpstreamNetworkErrorRetry(t *testing.T) {
 }
 
 func TestServer_Proxy_ContextCancelled(_ *testing.T) {
-	s := New("http://example.com", "token", "test", false)
+	s := New("http://example.com", "token", "test")
 	s.retryDelays = []time.Duration{200 * time.Millisecond}
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -973,7 +973,7 @@ func TestServer_Proxy_EarlySpoolRetry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var requestCount atomic.Int32
-			s := New("http://example.com", "token", "test", true)
+			s := New("http://example.com", "token", "test")
 			s.retryDelays = []time.Duration{time.Millisecond}
 			s.httpClient = &http.Client{
 				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -1025,7 +1025,7 @@ func TestServer_Proxy_EarlySpoolRetry(t *testing.T) {
 
 func TestServer_Proxy_MidStreamEOFDropRetry(t *testing.T) {
 	var requestCount atomic.Int32
-	s := New("http://example.com", "token", "test", true)
+	s := New("http://example.com", "token", "test")
 	s.spoolBytes = 2
 	s.retryDelays = []time.Duration{time.Millisecond}
 	s.httpClient = &http.Client{
@@ -1084,7 +1084,7 @@ func TestServer_Proxy_MidStreamEOFDropRetry(t *testing.T) {
 
 func TestServer_Proxy_SpoolThenStreamComplete(t *testing.T) {
 	var requestCount atomic.Int32
-	s := New("http://example.com", "token", "test", true)
+	s := New("http://example.com", "token", "test")
 	s.spoolBytes = 2
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -1127,7 +1127,7 @@ func TestServer_Proxy_SpoolThenStreamComplete(t *testing.T) {
 
 func TestServer_Proxy_RetryExhaustAfterCommit(t *testing.T) {
 	var requestCount atomic.Int32
-	s := New("http://example.com", "token", "test", false)
+	s := New("http://example.com", "token", "test")
 	s.spoolBytes = 2
 	s.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	s.httpClient = &http.Client{
@@ -1190,7 +1190,7 @@ func (e *errWriter) WriteHeader(_ int) {}
 func TestServer_Proxy_ClientWriteError(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://example.com", "token", "1.0", false)
+	s := New("http://example.com", "token", "1.0")
 	buf := newReadAheadBuffer(1024)
 	if _, err := buf.Write([]byte("payload data that cannot be written")); err != nil {
 		t.Fatal(err)
@@ -1207,7 +1207,7 @@ func TestServer_Proxy_ClientWriteError(t *testing.T) {
 func TestPumpBodyToBuffer_ProgressLog(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://example.com", "token", "1.0", true)
+	s := New("http://example.com", "token", "1.0")
 	payload := strings.Repeat("p", 2*1024*1024)
 	buf := newReadAheadBuffer(3 * 1024 * 1024)
 	var bytesFetched int64
@@ -1330,7 +1330,7 @@ func TestStart_NonTCPAddr(t *testing.T) {
 	})
 	defer cleanup()
 
-	s := New("http://example.com", "token", "1.0", false)
+	s := New("http://example.com", "token", "1.0")
 	if _, err := s.Start(); err == nil {
 		t.Error("expected error when listener is not TCP")
 	}
@@ -1342,7 +1342,7 @@ func TestStart_NetListenError(t *testing.T) {
 	})
 	defer cleanup()
 
-	s := New("http://example.com", "token", "1.0", false)
+	s := New("http://example.com", "token", "1.0")
 	if _, err := s.Start(); err == nil {
 		t.Error("expected error when netListen fails")
 	}
@@ -1373,7 +1373,7 @@ func TestStart_ServeError(t *testing.T) {
 	})
 	defer cleanup()
 
-	s := New("http://srv.example.net", "token", "1.0", false)
+	s := New("http://srv.example.net", "token", "1.0")
 	if _, err := s.Start(); err != nil {
 		t.Fatalf("unexpected Start error: %v", err)
 	}
@@ -1389,7 +1389,7 @@ func TestRegisterSession_TokenError(t *testing.T) {
 	})
 	defer cleanup()
 
-	s := New("http://tok.example.org", "token", "1.0", false)
+	s := New("http://tok.example.org", "token", "1.0")
 	if _, err := s.RegisterSession("sess-err", []string{"/t.mp3"}); err == nil {
 		t.Error("expected error when generateToken fails")
 	}
@@ -1428,7 +1428,7 @@ func TestShutdown_Error(t *testing.T) {
 	})
 	defer cleanup()
 
-	s := New("http://shut.example.net", "token", "1.0", false)
+	s := New("http://shut.example.net", "token", "1.0")
 	if _, err := s.Start(); err != nil {
 		t.Fatalf("start error: %v", err)
 	}
@@ -1465,7 +1465,7 @@ func TestResolveUpstreamURL_Errors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New(tt.absURL, "token", "1.0", false)
+			s := New(tt.absURL, "token", "1.0")
 			if _, err := s.resolveUpstreamURL(tt.trackURL); err == nil {
 				t.Error("expected error")
 			}
@@ -1474,14 +1474,14 @@ func TestResolveUpstreamURL_Errors(t *testing.T) {
 }
 
 func TestResolveTrack_EmptyURL(t *testing.T) {
-	s := New("http://empty.example.org", "token", "1.0", false)
+	s := New("http://empty.example.org", "token", "1.0")
 	if _, status, _ := s.resolveTrack([]string{""}, "0"); status != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", status)
 	}
 }
 
 func TestHandleTrack_CanceledContext(t *testing.T) {
-	s := New("http://ctx.example.net", "token", "1.0", false)
+	s := New("http://ctx.example.net", "token", "1.0")
 	sessionID := "sess-ctx-cancel"
 	token, err := s.RegisterSession(sessionID, []string{"/track.mp3"})
 	if err != nil {
@@ -1535,7 +1535,7 @@ func TestNewUpstreamRequest_Errors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New(tt.absURL, "token", "1.0", false)
+			s := New(tt.absURL, "token", "1.0")
 			var ctx context.Context
 			if !tt.useNilCtx {
 				ctx = context.Background()
@@ -1550,7 +1550,7 @@ func TestNewUpstreamRequest_Errors(t *testing.T) {
 func TestRequestInitial_NewRequestError(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://attempt.example.net", "token", "1.0", false)
+	s := New("http://attempt.example.net", "token", "1.0")
 	resp, err := s.requestInitial(context.Background(), ":", rangeHeader{}, false)
 	if resp != nil {
 		defer func() {
@@ -1588,7 +1588,7 @@ func TestConnectInitial_CommitWriteError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.body, func(t *testing.T) {
-			s := New("http://commit.example.com", "token", "1.0", false)
+			s := New("http://commit.example.com", "token", "1.0")
 			s.spoolBytes = tt.spoolSize
 			s.httpClient = &http.Client{
 				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -1625,7 +1625,7 @@ func TestServer_Proxy_RetryResetAfterHealthy(t *testing.T) {
 	t.Parallel()
 
 	var attempts atomic.Int32
-	s := New("http://abs.example.org", "token", "test", false)
+	s := New("http://abs.example.org", "token", "test")
 	s.spoolBytes = 2
 	s.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
 	s.minHealthyDuration = 10 * time.Millisecond
@@ -1690,7 +1690,7 @@ func TestServer_Proxy_ReadAheadBufferDecoupledResume(t *testing.T) {
 	firstPart := strings.Repeat("m", 4096)
 	secondPart := strings.Repeat("n", 4096)
 
-	s := New("http://decoupled.example.org", "token", "test", true)
+	s := New("http://decoupled.example.org", "token", "test")
 	s.spoolBytes = 128
 	s.retryDelays = []time.Duration{time.Millisecond}
 
@@ -1752,10 +1752,10 @@ func TestServer_Proxy_ReadAheadBufferDecoupledResume(t *testing.T) {
 	}
 }
 
-func TestServer_HandleRetryFailure_Debug(t *testing.T) {
+func TestServer_HandleRetryFailure(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://retry.example.org", "token", "1.0", true)
+	s := New("http://retry.example.org", "token", "1.0")
 	failures := len(s.retryDelays)
 	if s.handleRetryFailure(context.Background(), &failures, 100) {
 		t.Error("expected false when max retries exceeded")
@@ -1791,7 +1791,7 @@ func TestConnectInitial_SpoolReadError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := New("http://spool.example.com", "token", "1.0", false)
+			s := New("http://spool.example.com", "token", "1.0")
 			s.retryDelays = tt.delays
 			s.httpClient = &http.Client{
 				Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -1835,7 +1835,7 @@ func TestConnectInitial_SpoolReadError(t *testing.T) {
 func TestPumpBodyToBuffer_Cancelled(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://pump.example.org", "token", "1.0", false)
+	s := New("http://pump.example.org", "token", "1.0")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -1850,7 +1850,7 @@ func TestPumpBodyToBuffer_Cancelled(t *testing.T) {
 func TestPumpBodyToBuffer_BufferWriteError(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://pump.example.org", "token", "1.0", false)
+	s := New("http://pump.example.org", "token", "1.0")
 	buf := newReadAheadBuffer(1024)
 	buf.CloseWithError(errors.New("buffer closed"))
 
@@ -1864,7 +1864,7 @@ func TestPumpBodyToBuffer_BufferWriteError(t *testing.T) {
 func TestServer_ResumeUpstream_NewRequestError(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://resume.example.org", "token", "1.0", false)
+	s := New("http://resume.example.org", "token", "1.0")
 	body, _, err := s.resumeUpstream(context.Background(), ":", rangeHeader{}, 100)
 	if body != nil {
 		closeBody(body)
@@ -1877,7 +1877,7 @@ func TestServer_ResumeUpstream_NewRequestError(t *testing.T) {
 func TestPumpStream_BufferClosed(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://pump.example.org", "token", "1.0", false)
+	s := New("http://pump.example.org", "token", "1.0")
 	buf := newReadAheadBuffer(1024)
 	buf.CloseWithError(errBufferClosed)
 
@@ -1892,7 +1892,7 @@ func TestPumpStream_BufferClosed(t *testing.T) {
 func TestStreamFromBuffer_Cancelled(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://stream.example.org", "token", "1.0", false)
+	s := New("http://stream.example.org", "token", "1.0")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -1928,7 +1928,7 @@ func (m *mockErrAfterWriter) WriteHeader(_ int) {}
 func TestServer_Proxy_StreamErrorDebug(t *testing.T) {
 	t.Parallel()
 
-	s := New("http://debug.example.org", "token", "1.0", true)
+	s := New("http://debug.example.org", "token", "1.0")
 	s.spoolBytes = 4
 	s.httpClient = &http.Client{
 		Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
@@ -1944,4 +1944,17 @@ func TestServer_Proxy_StreamErrorDebug(t *testing.T) {
 	w := &mockErrAfterWriter{}
 	var lastActivity atomic.Int64
 	s.proxyWithRetry(context.Background(), w, "http://debug.example.org/audio.mp3", rangeHeader{}, &lastActivity)
+}
+
+func TestNew_ForceAttemptHTTP2(t *testing.T) {
+	t.Parallel()
+
+	s := New("http://h2.example.com", "token", "1.0")
+	tr, ok := s.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", s.httpClient.Transport)
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("expected ForceAttemptHTTP2 to be true")
+	}
 }

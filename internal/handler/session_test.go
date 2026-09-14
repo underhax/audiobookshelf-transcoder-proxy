@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -381,7 +382,7 @@ func TestHandleSessionStart_Debug(t *testing.T) {
 			Body:       io.NopCloser(bytes.NewReader(data)),
 		}, nil
 	})
-	h.cfg.Debug = true
+	h.cfg.LogLevel = slog.LevelDebug
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/proxy/session/start", strings.NewReader(`{"itemId":"book-debug"}`))
 	req.Header.Set("Authorization", "Bearer proxy-secret-key")
@@ -588,4 +589,45 @@ func TestHandleSessionTerminate_WriteError(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer proxy-secret-key")
 
 	h.HandleSessionStop(ew, req)
+}
+
+func TestHandleSessionTerminate_ThresholdSnapping(t *testing.T) {
+	t.Parallel()
+
+	var syncedPos float64
+	h, store := newTestEnv(t, func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/sync") {
+			var sReq absclient.SyncRequest
+			if err := json.NewDecoder(req.Body).Decode(&sReq); err == nil {
+				syncedPos = sReq.CurrentTime
+			}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		}, nil
+	})
+
+	sess := &session.Session{
+		ID:          "sess-term-snap",
+		CurrentTime: 95,
+		Duration:    100,
+		Speed:       1.0,
+	}
+	if _, err := store.Create(sess); err != nil {
+		t.Fatalf("create sess: %v", err)
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/proxy/session/stop", strings.NewReader(`{"sessionId":"sess-term-snap"}`))
+	req.Header.Set("Authorization", "Bearer proxy-secret-key")
+	rec := httptest.NewRecorder()
+
+	h.HandleSessionStop(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if syncedPos != 100 {
+		t.Errorf("expected snapped pos 100, got %v", syncedPos)
+	}
 }

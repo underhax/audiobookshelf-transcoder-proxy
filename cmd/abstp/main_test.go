@@ -38,7 +38,7 @@ func (errWriter) Write(_ []byte) (int, error) {
 func validTestEnv() func(string) string {
 	env := map[string]string{
 		"ABSTP_ABS_URL":      "http://abs.example.com",
-		"ABSTP_ABS_TOKEN":    "test-token",
+		"ABSTP_ABS_API_KEY":  "test-api-key",
 		"ABSTP_API_KEY":      "secret-key",
 		"ABSTP_LISTEN_ADDR":  "127.0.0.1:8099",
 		"ABSTP_EXTERNAL_URL": "http://proxy.example.com:8099",
@@ -72,7 +72,7 @@ func TestCheckCommands(t *testing.T) {
 			args:        []string{"-help"},
 			name:        "help flag",
 			wantHandled: true,
-			wantSubstr:  "ABSTP_IN_DOCKER",
+			wantSubstr:  "ABSTP_LOG_LEVEL",
 		},
 		{
 			args:        []string{"version"},
@@ -325,8 +325,8 @@ func TestRun_ServerStartupAndGracefulShutdown(t *testing.T) {
 func TestRun_ServerStartupConfigurations(t *testing.T) {
 	tests := []struct {
 		name        string
+		logLevel    string
 		docker      bool
-		debug       bool
 		devReusable bool
 	}{
 		{
@@ -334,8 +334,8 @@ func TestRun_ServerStartupConfigurations(t *testing.T) {
 			docker: true,
 		},
 		{
-			name:        "with debug and dev reusable token",
-			debug:       true,
+			name:        "with log level debug and dev reusable token",
+			logLevel:    "DEBUG",
 			devReusable: true,
 		},
 	}
@@ -351,10 +351,12 @@ func TestRun_ServerStartupConfigurations(t *testing.T) {
 
 			env := func(k string) string {
 				switch {
-				case tt.docker && k == "ABSTP_IN_DOCKER",
-					tt.debug && k == "ABSTP_DEBUG",
-					tt.devReusable && k == "ABSTP_DEV_REUSABLE_TOKEN":
+				case tt.docker && k == "ABSTP_IN_DOCKER":
 					return "true"
+				case tt.devReusable && k == "ABSTP_DEV_REUSABLE_TOKEN":
+					return "true"
+				case tt.logLevel != "" && k == "ABSTP_LOG_LEVEL":
+					return tt.logLevel
 				default:
 					return validTestEnv()(k)
 				}
@@ -478,7 +480,7 @@ func TestDefaultStartTrackProxy_Error(t *testing.T) {
 	})
 	defer cleanup()
 
-	tp := trackproxy.New("http://start-err.example.net", "token", "1.0", false)
+	tp := trackproxy.New("http://start-err.example.net", "token", "1.0")
 	if _, err := defaultStartTrackProxy(tp); err == nil {
 		t.Error("expected error when tp.Start fails")
 	}
@@ -497,7 +499,7 @@ func TestDefaultShutdownTrackProxy_Error(t *testing.T) {
 	})
 	defer cleanup()
 
-	tp := trackproxy.New("http://shut-err.example.net", "token", "1.0", false)
+	tp := trackproxy.New("http://shut-err.example.net", "token", "1.0")
 	if _, err := tp.Start(); err != nil {
 		t.Fatalf("start error: %v", err)
 	}

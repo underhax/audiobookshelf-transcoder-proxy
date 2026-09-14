@@ -3,7 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/underhax/audiobookshelf-transcoder-proxy/internal/absclient"
@@ -13,7 +13,7 @@ import (
 func (h *Handler) HandleGetBooks(w http.ResponseWriter, r *http.Request) {
 	books, err := h.absClient.GetMediaItems(r.Context(), "book")
 	if err != nil {
-		log.Printf("get books failed: %v", err)
+		slog.Error("get books failed", "error", err)
 		http.Error(w, `{"error":"failed to get books"}`, http.StatusBadGateway)
 		return
 	}
@@ -22,7 +22,7 @@ func (h *Handler) HandleGetBooks(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(books); err != nil {
-		log.Printf("encode books error: %v", err)
+		slog.Error("encode books error", "error", err)
 	}
 }
 
@@ -30,7 +30,7 @@ func (h *Handler) HandleGetBooks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleGetPodcasts(w http.ResponseWriter, r *http.Request) {
 	podcasts, err := h.absClient.GetMediaItems(r.Context(), "podcast")
 	if err != nil {
-		log.Printf("get podcasts failed: %v", err)
+		slog.Error("get podcasts failed", "error", err)
 		http.Error(w, `{"error":"failed to get podcasts"}`, http.StatusBadGateway)
 		return
 	}
@@ -39,7 +39,7 @@ func (h *Handler) HandleGetPodcasts(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(podcasts); err != nil {
-		log.Printf("encode podcasts error: %v", err)
+		slog.Error("encode podcasts error", "error", err)
 	}
 }
 
@@ -48,7 +48,7 @@ func (h *Handler) HandleGetPodcastEpisodes(w http.ResponseWriter, r *http.Reques
 	podcastID := r.PathValue("podcast_id")
 	episodes, err := h.absClient.GetPodcastEpisodes(r.Context(), podcastID)
 	if err != nil {
-		log.Printf("get podcast episodes failed: %v", err)
+		slog.Error("get podcast episodes failed", "podcast_id", podcastID, "error", err)
 		http.Error(w, `{"error":"failed to get podcast episodes"}`, http.StatusBadGateway)
 		return
 	}
@@ -57,7 +57,7 @@ func (h *Handler) HandleGetPodcastEpisodes(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(episodes); err != nil {
-		log.Printf("encode podcast episodes error: %v", err)
+		slog.Error("encode podcast episodes error", "podcast_id", podcastID, "error", err)
 	}
 }
 
@@ -65,7 +65,7 @@ func (h *Handler) HandleGetPodcastEpisodes(w http.ResponseWriter, r *http.Reques
 func (h *Handler) HandleGetInProgress(w http.ResponseWriter, r *http.Request) {
 	items, err := h.absClient.GetInProgressItems(r.Context())
 	if err != nil {
-		log.Printf("get in-progress items failed: %v", err)
+		slog.Error("get in-progress items failed", "error", err)
 		http.Error(w, `{"error":"failed to get in-progress items"}`, http.StatusBadGateway)
 		return
 	}
@@ -74,7 +74,7 @@ func (h *Handler) HandleGetInProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(items); err != nil {
-		log.Printf("encode in-progress items error: %v", err)
+		slog.Error("encode in-progress items error", "error", err)
 	}
 }
 
@@ -83,7 +83,7 @@ func (h *Handler) HandleGetBookChapters(w http.ResponseWriter, r *http.Request) 
 	bookID := r.PathValue("book_id")
 	chapters, err := h.absClient.GetBookChapters(r.Context(), bookID)
 	if err != nil {
-		log.Printf("get book chapters failed: %v", err)
+		slog.Error("get book chapters failed", "book_id", bookID, "error", err)
 		http.Error(w, `{"error":"failed to get book chapters"}`, http.StatusBadGateway)
 		return
 	}
@@ -92,7 +92,7 @@ func (h *Handler) HandleGetBookChapters(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(chapters); err != nil {
-		log.Printf("encode book chapters error: %v", err)
+		slog.Error("encode book chapters error", "book_id", bookID, "error", err)
 	}
 }
 
@@ -101,13 +101,13 @@ func (h *Handler) HandleGetCover(w http.ResponseWriter, r *http.Request) {
 	itemID := r.PathValue("item_id")
 	body, contentType, err := h.absClient.GetCover(r.Context(), itemID)
 	if err != nil {
-		log.Printf("get cover failed: %v", err)
+		slog.Error("get cover failed", "item_id", itemID, "error", err)
 		http.Error(w, `{"error":"cover not found"}`, http.StatusNotFound)
 		return
 	}
 	defer func() {
 		if closeErr := body.Close(); closeErr != nil {
-			log.Printf("close cover body error: %v", closeErr)
+			slog.Debug("close cover body error", "item_id", itemID, "error", closeErr)
 		}
 	}()
 
@@ -116,6 +116,6 @@ func (h *Handler) HandleGetCover(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
 	}
 	if _, err := io.Copy(w, body); err != nil {
-		log.Printf("stream cover error: %v", err)
+		slog.Error("stream cover error", "item_id", itemID, "error", err)
 	}
 }

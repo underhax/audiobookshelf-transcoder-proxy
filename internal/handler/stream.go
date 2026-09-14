@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -74,7 +74,7 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 
 	playResp, err := h.absClient.StartSession(r.Context(), req.ItemID, req.EpisodeID)
 	if err != nil {
-		log.Printf("start abs session failed: %v", err)
+		slog.Error("start abs session failed", "error", err)
 		http.Error(w, `{"error":"failed to start abs session"}`, http.StatusBadGateway)
 		return
 	}
@@ -124,16 +124,14 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 
 	token, err := h.store.Create(sess)
 	if err != nil {
-		log.Printf("store session error: %v", err)
+		slog.Error("store session error", "error", err)
 		http.Error(w, `{"error":"failed to generate session"}`, http.StatusInternalServerError)
 		return
 	}
 
 	streamURL := fmt.Sprintf("%s/stream/%s.aac?token=%s", externalBase, sess.ID, token)
 
-	if h.cfg.Debug {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] session created: id=%s, item_id=%s, stream_url=%s", sess.ID, sess.ItemID, streamURL), "\n", " "))
-	}
+	slog.Debug("session created", "id", sess.ID, "item_id", sess.ItemID, "stream_url", streamURL)
 
 	respData := StartSessionResponse{
 		SessionID:   sess.ID,
@@ -145,7 +143,7 @@ func (h *Handler) HandleSessionStart(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(respData); err != nil {
-		log.Printf("encode session start response error: %v", err)
+		slog.Error("encode session start response error", "error", err)
 	}
 }
 
@@ -191,7 +189,7 @@ func prepareInput(proxyPort int, sessionID, proxyToken string, tracks []absclien
 	cleanup = func() {
 		cleanPath := filepath.Clean(concatPath)
 		if rmErr := os.Remove(cleanPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Printf("remove concat file error: %v", rmErr)
+			slog.Debug("remove concat file error", "error", rmErr)
 		}
 	}
 
@@ -249,10 +247,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSuffix(strings.TrimSuffix(rawSessionID, ".aac"), ".mp3")
 	token := r.URL.Query().Get("token")
 
-	if h.cfg.Debug {
-		msg := strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("[DEBUG] %s %s from %s, User-Agent: %s", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent()), "\n", " "), "\r", "")
-		log.Println(msg)
-	}
+	slog.Debug("incoming stream request", "method", r.Method, "path", r.URL.Path, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent())
 
 	sess, ok := h.validateStreamRequest(w, r, sessionID, token)
 	if !ok {
@@ -265,9 +260,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	h.writeICYHeaders(w, r, sess)
 
 	if isProbeRequest(r) {
-		if h.cfg.Debug {
-			log.Println(strings.ReplaceAll("[DEBUG] HEAD request answered 200 OK for session "+sessionID, "\n", " "))
-		}
+		slog.Debug("probe request answered 200 OK", "session_id", sessionID)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -280,13 +273,11 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.cfg.Debug {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] stream token validated for session %s (reusable=%v), preparing input", sessionID, h.cfg.DevReusableToken), "\n", " "))
-	}
+	slog.Debug("stream token validated", "session_id", sessionID, "reusable", h.cfg.DevReusableToken)
 
 	proxyPort, proxyToken, unregister, err := h.registerTrackProxySession(sessionID, sess.AudioTracks)
 	if err != nil {
-		log.Printf("register track proxy session failed: %v", err)
+		slog.Error("register track proxy session failed", "error", err)
 		http.Error(w, `{"error":"failed to initialize media proxy"}`, http.StatusInternalServerError)
 		return
 	}
@@ -294,7 +285,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 
 	inputPath, cleanup, err := prepareInput(proxyPort, sessionID, proxyToken, sess.AudioTracks, sess.StartingTrackIndex, sess.SeekOffset)
 	if err != nil {
-		log.Printf("prepare input failed: %v", err)
+		slog.Error("prepare input failed", "error", err)
 		http.Error(w, `{"error":"failed to prepare media input"}`, http.StatusInternalServerError)
 		return
 	}
@@ -308,7 +299,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 
 	cmd, stdout, stderrBuf, err := ffmpeg.StartProcess(streamCtx, &params)
 	if err != nil {
-		log.Printf("start ffmpeg error: %v", err)
+		slog.Error("start ffmpeg error", "error", err)
 		http.Error(w, `{"error":"failed to start transcoder"}`, http.StatusInternalServerError)
 		return
 	}
@@ -325,9 +316,7 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	defer close(syncStop)
 	go h.runSyncLoop(streamCtx, sess, syncStop)
 
-	if h.cfg.Debug {
-		log.Println(strings.ReplaceAll("[DEBUG] streaming started for session "+sessionID, "\n", " "))
-	}
+	slog.Debug("streaming started", "session_id", sessionID)
 
 	streamStart := time.Now()
 
@@ -340,13 +329,11 @@ func (h *Handler) HandleStream(w http.ResponseWriter, r *http.Request) {
 	termReason := h.pipeStreamToClient(streamCtx, stdout, rw, sess)
 
 	if sess.BytesSent.Load() == 0 {
-		if h.cfg.Debug {
-			log.Println(strings.ReplaceAll("[DEBUG] client disconnected before receiving audio data (probe), session retained: "+sessionID, "\n", " "))
-		}
+		slog.Debug("client disconnected before receiving audio data (probe), session retained", "session_id", sessionID)
 		return
 	}
 
-	h.handleDisconnectSync(r.Context(), sess)
+	h.handleDisconnectSync(r.Context(), sess, termReason)
 
 	elapsed := time.Since(streamStart)
 	h.logStreamEnd(sessionID, sess, elapsed, termReason, stderrBuf)
@@ -364,31 +351,46 @@ func (h *Handler) validateStreamRequest(w http.ResponseWriter, r *http.Request, 
 	reusable := isProbeRequest(r) || h.cfg.DevReusableToken
 	sess, err := h.store.ValidateToken(sessionID, token, reusable)
 	if err != nil {
-		if h.cfg.Debug {
-			log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] stream token validation failed for session %s: %v", sessionID, err), "\n", " "))
-		}
+		slog.Debug("stream token validation failed", "session_id", sessionID, "error", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusUnauthorized)
 		return nil, false
 	}
 	return sess, true
 }
 
-func (h *Handler) handleDisconnectSync(ctx context.Context, sess *session.Session) {
-	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
+func (h *Handler) handleDisconnectSync(ctx context.Context, sess *session.Session, termReason string) {
+	speed := sess.Speed
+	if speed <= 0 {
+		speed = 1.0
+	}
+	var currentPos float64
+	if termReason == "eof" {
+		if sess.Duration > 0 {
+			currentPos = sess.Duration
+		} else {
+			currentPos = calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), speed, 0, sess.AudioElapsed(time.Now()))
+		}
+	} else {
+		currentPos = calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
+		if sess.Duration > 0 && sess.Duration-currentPos <= h.cfg.BufferDuration.Seconds()*speed {
+			currentPos = sess.Duration
+		}
+	}
 	syncReq := absclient.SyncRequest{
 		CurrentTime:  currentPos,
-		TimeListened: currentPos - sess.GetLastSyncPosition(),
+		TimeListened: max(0, currentPos-sess.GetLastSyncPosition()),
 		Duration:     sess.Duration,
 	}
-	sess.SetLastSyncPosition(currentPos)
 	disconnectCtx, disconnectCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer disconnectCancel()
 	if syncErr := h.absClient.SyncSession(disconnectCtx, sess.ID, syncReq); syncErr != nil {
-		log.Printf("disconnect sync failed: %v", syncErr)
+		slog.Error("disconnect sync failed", "session_id", sess.ID, "error", syncErr)
+	} else {
+		sess.SetLastSyncPosition(currentPos)
 	}
 	if !h.cfg.DevReusableToken {
 		if closeErr := h.absClient.CloseSession(disconnectCtx, sess.ID); closeErr != nil {
-			log.Printf("disconnect close failed: %v", closeErr)
+			slog.Error("disconnect close failed", "session_id", sess.ID, "error", closeErr)
 		}
 	}
 }
@@ -414,14 +416,14 @@ func callProcessKill(p *os.Process) error {
 
 func terminateProcess(sessionID string, stdout io.Closer, cmd *exec.Cmd, stderrBuf *bytes.Buffer) {
 	if closeErr := stdout.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("close stdout error for session %s: %v", sessionID, closeErr), "\n", " "))
+		slog.Debug("close stdout error", "session_id", sessionID, "error", closeErr)
 	}
 	if cmd == nil {
 		return
 	}
 	if cmd.Process != nil {
 		if killErr := callProcessKill(cmd.Process); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-			log.Println(strings.ReplaceAll(fmt.Sprintf("kill process error for session %s: %v", sessionID, killErr), "\n", " "))
+			slog.Error("kill process error", "session_id", sessionID, "error", killErr)
 		}
 	}
 	logProcessExit(sessionID, cmd, stderrBuf)
@@ -437,19 +439,25 @@ func logProcessExit(sessionID string, cmd *exec.Cmd, stderrBuf *bytes.Buffer) {
 		}
 	}
 	if waitErr == nil {
+		code := 0
 		if cmd.ProcessState != nil {
-			log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited cleanly with code %d", sessionID, cmd.ProcessState.ExitCode()), "\n", " "))
+			code = cmd.ProcessState.ExitCode()
 		}
+		slog.Info("ffmpeg process exited cleanly", "session_id", sessionID, "exit_code", code)
 		return
 	}
 	if errors.Is(waitErr, os.ErrProcessDone) || strings.Contains(waitErr.Error(), "already waited") || strings.Contains(waitErr.Error(), "not started") {
 		return
 	}
 	if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg process for session %s exited with code %d: %v%s", sessionID, exitErr.ExitCode(), exitErr, stderrOutput), "\n", " "))
+		if strings.Contains(exitErr.Error(), "killed") || strings.Contains(exitErr.String(), "killed") {
+			slog.Debug("ffmpeg process terminated", "session_id", sessionID, "reason", "killed")
+			return
+		}
+		slog.Error("ffmpeg process exited with error", "session_id", sessionID, "exit_code", exitErr.ExitCode(), "error", exitErr, "stderr", stderrOutput)
 		return
 	}
-	log.Println(strings.ReplaceAll(fmt.Sprintf("wait ffmpeg process error for session %s: %v%s", sessionID, waitErr, stderrOutput), "\n", " "))
+	slog.Error("wait ffmpeg process error", "session_id", sessionID, "error", waitErr, "stderr", stderrOutput)
 }
 
 func (h *Handler) startKeepalive(ctx context.Context, rw *ratelimit.Writer, sess *session.Session, writeMu *sync.Mutex) context.CancelFunc {
@@ -470,8 +478,8 @@ func (h *Handler) startKeepalive(ctx context.Context, rw *ratelimit.Writer, sess
 				writeMu.Lock()
 				if sess.BytesSent.Load() == 0 {
 					_, writeErr := rw.Write([]byte{0})
-					if writeErr != nil && h.cfg.Debug {
-						log.Println(strings.ReplaceAll(fmt.Sprintf("keepalive write error: %v", writeErr), "\n", " "))
+					if writeErr != nil {
+						slog.Debug("keepalive write error", "error", writeErr)
 					}
 				}
 				writeMu.Unlock()
@@ -521,9 +529,6 @@ func (h *Handler) pipeStreamToClient(streamCtx context.Context, stdout io.Reader
 }
 
 func (h *Handler) startProgressLogger(ctx context.Context, sess *session.Session, sessionID string, start time.Time) func() {
-	if !h.cfg.Debug {
-		return func() {}
-	}
 	progressStop := make(chan struct{})
 	go h.logStreamProgress(ctx, sess, sessionID, start, progressStop)
 	return func() { close(progressStop) }
@@ -545,19 +550,29 @@ func (h *Handler) logStreamProgress(ctx context.Context, sess *session.Session, 
 			return
 		case <-ticker.C:
 			pos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
-			log.Println(strings.ReplaceAll(fmt.Sprintf("[DEBUG] progress session=%s elapsed=%s bytes=%d position=%.1f",
-				sessionID, time.Since(start).Truncate(time.Second), sess.BytesSent.Load(), pos), "\n", " "))
+			slog.Debug("stream progress",
+				"session_id", sessionID,
+				"elapsed", time.Since(start).Truncate(time.Second),
+				"bytes", sess.BytesSent.Load(),
+				"position", fmt.Sprintf("%.1f", pos),
+			)
 		}
 	}
 }
 
 func (h *Handler) logStreamEnd(sessionID string, sess *session.Session, elapsed time.Duration, reason string, stderrBuf *bytes.Buffer) {
-	log.Println(strings.ReplaceAll(fmt.Sprintf("stream ended session=%s elapsed=%s bytes=%d reason=%s",
-		sessionID, elapsed.Truncate(time.Second), sess.BytesSent.Load(), reason), "\n", " "))
+	slog.Info("stream ended",
+		"session_id", sessionID,
+		"elapsed", elapsed.Truncate(time.Second),
+		"bytes", sess.BytesSent.Load(),
+		"reason", reason,
+	)
 
 	if stderrBuf != nil && stderrBuf.Len() > 0 {
 		cleaned := strings.ReplaceAll(strings.TrimSpace(stderrBuf.String()), "\n", " | ")
-		log.Println(strings.ReplaceAll(fmt.Sprintf("ffmpeg stderr session=%s: %s", sessionID, cleaned), "\n", " "))
+		if cleaned != "" {
+			slog.Debug("ffmpeg stderr", "session_id", sessionID, "stderr", cleaned)
+		}
 	}
 }
 
@@ -590,13 +605,14 @@ func (h *Handler) runSyncLoop(ctx context.Context, sess *session.Session, stop <
 			currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
 			syncReq := absclient.SyncRequest{
 				CurrentTime:  currentPos,
-				TimeListened: currentPos - sess.GetLastSyncPosition(),
+				TimeListened: max(0, currentPos-sess.GetLastSyncPosition()),
 				Duration:     sess.Duration,
 			}
-			sess.SetLastSyncPosition(currentPos)
 
 			if err := h.absClient.SyncSession(ctx, sess.ID, syncReq); err != nil {
-				log.Printf("periodic sync failed: %v", err)
+				slog.Error("periodic sync failed", "session_id", sess.ID, "error", err)
+			} else {
+				sess.SetLastSyncPosition(currentPos)
 			}
 		}
 	}
@@ -607,57 +623,78 @@ func (h *Handler) HandleSessionStop(w http.ResponseWriter, r *http.Request) {
 	h.handleSessionTerminate(w, r)
 }
 
-func (h *Handler) handleSessionTerminate(w http.ResponseWriter, r *http.Request) {
+func parseSessionActionRequest(r *http.Request) (string, error) {
 	var req SessionActionRequest
 	bodyReader := io.LimitReader(r.Body, maxRequestBodySize)
 	if err := json.NewDecoder(bodyReader).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request body: malformed JSON"}`, http.StatusBadRequest)
-		return
+		return "", errors.New("invalid request body: malformed JSON")
 	}
 
-	if req.SessionID == "" {
-		req.SessionID = req.SnakeSessionID
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID = req.SnakeSessionID
 	}
-	if req.SessionID == "" {
-		http.Error(w, `{"error":"valid sessionId is required"}`, http.StatusBadRequest)
-		return
+	if sessionID == "" {
+		return "", errors.New("valid sessionId is required")
 	}
+	return sessionID, nil
+}
 
-	sess, ok := h.store.Get(req.SessionID)
-	if !ok {
-		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
-		return
-	}
-
+func stopSessionProcess(sess *session.Session) {
 	if sess.Cancel != nil {
 		sess.Cancel()
 	}
 	if sess.Cmd != nil && sess.Cmd.Process != nil {
 		if killErr := callProcessKill(sess.Cmd.Process); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-			log.Printf("kill ffmpeg process on terminate: %v", killErr)
+			slog.Error("kill ffmpeg process on terminate", "session_id", sess.ID, "error", killErr)
 		}
 	}
+}
 
-	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), sess.Speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
+func (h *Handler) handleSessionTerminate(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := parseSessionActionRequest(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	sess, ok := h.store.Get(sessionID)
+	if !ok {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+
+	stopSessionProcess(sess)
+
+	speed := sess.Speed
+	if speed <= 0 {
+		speed = 1.0
+	}
+	currentPos := calculateCurrentPosition(sess.CurrentTime, sess.BytesSent.Load(), speed, h.cfg.BufferDuration, sess.AudioElapsed(time.Now()))
+	if sess.Duration > 0 && sess.Duration-currentPos <= h.cfg.BufferDuration.Seconds()*speed {
+		currentPos = sess.Duration
+	}
 	syncReq := absclient.SyncRequest{
 		CurrentTime:  currentPos,
-		TimeListened: currentPos - sess.GetLastSyncPosition(),
+		TimeListened: max(0, currentPos-sess.GetLastSyncPosition()),
 		Duration:     sess.Duration,
 	}
 
-	if err := h.absClient.SyncSession(r.Context(), sess.ID, syncReq); err != nil {
-		log.Printf("final sync error for session %s: %v", sess.ID, err)
+	if syncErr := h.absClient.SyncSession(r.Context(), sess.ID, syncReq); syncErr != nil {
+		slog.Error("final sync error", "session_id", sess.ID, "error", syncErr)
+	} else {
+		sess.SetLastSyncPosition(currentPos)
 	}
 
-	if err := h.absClient.CloseSession(r.Context(), sess.ID); err != nil {
-		log.Printf("close abs session error for %s: %v", sess.ID, err)
+	if closeErr := h.absClient.CloseSession(r.Context(), sess.ID); closeErr != nil {
+		slog.Error("close abs session error", "session_id", sess.ID, "error", closeErr)
 	}
 	h.store.Delete(sess.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(`{"status":"stopped"}`)); err != nil {
-		log.Printf("write terminate response error: %v", err)
+	if _, writeErr := w.Write([]byte(`{"status":"stopped"}`)); writeErr != nil {
+		slog.Error("write terminate response error", "session_id", sess.ID, "error", writeErr)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -461,7 +462,7 @@ func TestPipeStreamToClient_KeepaliveAndWriteError(t *testing.T) {
 	t.Parallel()
 
 	h, store := newTestEnv(t, nil)
-	h.cfg.Debug = true
+	h.cfg.LogLevel = slog.LevelDebug
 	h.keepaliveInterval = 5 * time.Millisecond
 
 	sess := &session.Session{

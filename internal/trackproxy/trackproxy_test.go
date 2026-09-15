@@ -1889,6 +1889,101 @@ func TestPumpStream_BufferClosed(t *testing.T) {
 	}
 }
 
+type mockCanceledReader struct {
+	cancel context.CancelFunc
+}
+
+func (m *mockCanceledReader) Read(_ []byte) (int, error) {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return 0, context.Canceled
+}
+
+func TestPumpBodyToBuffer_ClientDisconnectedDuringRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		withCancel bool
+	}{
+		{
+			name:       "context cancelled",
+			withCancel: true,
+		},
+		{
+			name:       "stream read cancelled without context cancel",
+			withCancel: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := New("http://pump.example.org", "token", "1.0")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			buf := newReadAheadBuffer(1024)
+			var bytesFetched int64
+
+			var cancelFunc context.CancelFunc
+			if tt.withCancel {
+				cancelFunc = cancel
+			}
+
+			r := &mockCanceledReader{cancel: cancelFunc}
+			completed, err := s.pumpBodyToBuffer(ctx, buf, r, &bytesFetched, 4)
+			if completed || !errors.Is(err, context.Canceled) {
+				t.Errorf("expected completed=false and context.Canceled, got completed=%v err=%v", completed, err)
+			}
+		})
+	}
+}
+
+func TestPumpStream_ContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		makeCtx func(t *testing.T) context.Context
+		name    string
+	}{
+		{
+			makeCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				return ctx
+			},
+			name: "canceled",
+		},
+		{
+			makeCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Hour))
+				t.Cleanup(cancel)
+				return ctx
+			},
+			name: "deadline exceeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := New("http://pump.example.org", "token", "1.0")
+			ctx := tt.makeCtx(t)
+
+			buf := newReadAheadBuffer(1024)
+			var bytesFetched int64
+			failures := 0
+			done := s.pumpStream(ctx, buf, io.NopCloser(strings.NewReader("payload")), 7, &bytesFetched, time.Now(), &failures)
+			if !done {
+				t.Error("expected done=true when context is done")
+			}
+		})
+	}
+}
+
 func TestStreamFromBuffer_Cancelled(t *testing.T) {
 	t.Parallel()
 
@@ -1957,13 +2052,7 @@ func TestNew_ForceAttemptHTTP2(t *testing.T) {
 	if !tr.ForceAttemptHTTP2 {
 		t.Error("expected ForceAttemptHTTP2 to be true")
 	}
-	if tr.HTTP2 == nil {
-		t.Fatal("expected tr.HTTP2 to be configured")
-	}
-	if tr.HTTP2.SendPingTimeout != 15*time.Second {
-		t.Errorf("expected SendPingTimeout 15s, got %v", tr.HTTP2.SendPingTimeout)
-	}
-	if tr.HTTP2.PingTimeout != 10*time.Second {
-		t.Errorf("expected PingTimeout 10s, got %v", tr.HTTP2.PingTimeout)
+	if tr.HTTP2 != nil {
+		t.Errorf("expected tr.HTTP2 to be nil, got %v", tr.HTTP2)
 	}
 }

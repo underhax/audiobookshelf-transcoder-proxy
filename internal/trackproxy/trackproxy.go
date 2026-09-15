@@ -66,10 +66,6 @@ func New(absURL, token, version string) *Server {
 				MaxIdleConns:        20,
 				MaxIdleConnsPerHost: 10,
 				ForceAttemptHTTP2:   true,
-				HTTP2: &http.HTTP2Config{
-					SendPingTimeout: 15 * time.Second,
-					PingTimeout:     10 * time.Second,
-				},
 			},
 		},
 		retryDelays: []time.Duration{
@@ -476,6 +472,9 @@ func waitRetryDelay(ctx context.Context, delay time.Duration) bool {
 }
 
 func (s *Server) handleRetryFailure(ctx context.Context, consecutiveFailures *int, bytesTransferred int64) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	if *consecutiveFailures >= len(s.retryDelays) {
 		slog.Error("trackproxy: max retry attempts reached without progress", "attempts", len(s.retryDelays))
 		return false
@@ -626,6 +625,13 @@ func (s *Server) pumpBodyToBuffer(ctx context.Context, buf *readAheadBuffer, bod
 		if readErr == nil {
 			continue
 		}
+		if ctx.Err() != nil || errors.Is(readErr, context.Canceled) {
+			slog.Debug("trackproxy: client disconnected, aborting upstream read", "error", readErr)
+			if ctx.Err() != nil {
+				return false, fmt.Errorf("context cancelled during stream: %w", ctx.Err())
+			}
+			return false, fmt.Errorf("stream read cancelled: %w", readErr)
+		}
 		if !errors.Is(readErr, io.EOF) {
 			slog.Warn("trackproxy: upstream stream read error", "error", readErr)
 			return false, nil
@@ -698,7 +704,10 @@ func (s *Server) pumpStream(ctx context.Context, buf *readAheadBuffer, body io.R
 		buf.CloseWithError(io.EOF)
 		return true
 	}
-	if fetchErr != nil && errors.Is(fetchErr, errBufferClosed) {
+	if fetchErr != nil && (errors.Is(fetchErr, errBufferClosed) || errors.Is(fetchErr, context.Canceled)) {
+		return true
+	}
+	if ctx.Err() != nil {
 		return true
 	}
 
@@ -720,7 +729,9 @@ func (s *Server) fetchToBuffer(ctx context.Context, buf *readAheadBuffer, upstre
 
 	for {
 		if !s.handleRetryFailure(ctx, &consecutiveFailures, bytesFetched) {
-			buf.CloseWithError(errors.New("upstream stream aborted: max retries reached"))
+			if ctx.Err() == nil {
+				buf.CloseWithError(errors.New("upstream stream aborted: max retries reached"))
+			}
 			return
 		}
 

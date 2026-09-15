@@ -1957,4 +1957,13 @@ func TestNew_ForceAttemptHTTP2(t *testing.T) {
 	if !tr.ForceAttemptHTTP2 {
 		t.Error("expected ForceAttemptHTTP2 to be true")
 	}
+	if tr.HTTP2 == nil {
+		t.Fatal("expected tr.HTTP2 to be configured")
+	}
+	if tr.HTTP2.SendPingTimeout != 15*time.Second {
+		t.Errorf("expected SendPingTimeout 15s, got %v", tr.HTTP2.SendPingTimeout)
+	}
+	if tr.HTTP2.PingTimeout != 10*time.Second {
+		t.Errorf("expected PingTimeout 10s, got %v", tr.HTTP2.PingTimeout)
+	}
 }

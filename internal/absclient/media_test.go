@@ -59,7 +59,7 @@ func TestGetPodcastEpisodes(t *testing.T) {
 						]
 					},
 					"userMediaProgress": [
-						{"episodeId": "ep-1", "currentTime": 350.5, "isFinished": true}
+						{"episodeId": "ep-2", "currentTime": 350.5, "isFinished": true}
 					]
 				}`
 				return &http.Response{
@@ -318,6 +318,14 @@ func TestGetMediaItems(t *testing.T) {
 			librariesResp: `{"libraries":[{"id":"lib-1","name":"Books","mediaType":"book"},{"id":"lib-2","name":"Podcasts","mediaType":"podcast"}]}`,
 			itemsCode:     http.StatusOK,
 			itemsResp:     `{"results":[{"id":"b-1","media":{"metadata":{"title":"Book One","authorName":"Author A"},"duration":1200},"userMediaProgress":{"currentTime":100}}]}`,
+			wantItems:     1,
+		},
+		{
+			name:          "author fallback and series slice",
+			librariesCode: http.StatusOK,
+			librariesResp: `{"libraries":[{"id":"lib-series","name":"Books","mediaType":"book"}]}`,
+			itemsCode:     http.StatusOK,
+			itemsResp:     `{"results":[{"id":"b-series","media":{"metadata":{"title":"Series Book","author":"Fallback Author","series":[{"id":"ser-1","name":"Main Series","sequence":"2"}]},"duration":1200}}]}`,
 			wantItems:     1,
 		},
 		{

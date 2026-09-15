@@ -12,6 +12,8 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -274,42 +276,54 @@ type Library struct {
 
 // MediaItem represents an individual book or podcast containing playback duration, progress offset, and proxy cover URIs.
 type MediaItem struct {
-	ID         string  `json:"id"`
-	Title      string  `json:"title"`
-	Author     string  `json:"author,omitempty"`
-	Narrator   string  `json:"narrator,omitempty"`
-	MediaType  string  `json:"mediaType"`
-	CoverURL   string  `json:"coverUrl"`
-	Duration   float64 `json:"duration"`
-	Progress   float64 `json:"progress"`
-	IsFinished bool    `json:"isFinished"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Author      string   `json:"author,omitempty"`
+	Narrator    string   `json:"narrator,omitempty"`
+	Series      string   `json:"series,omitempty"`
+	SeriesID    string   `json:"seriesId,omitempty"`
+	Sequence    string   `json:"sequence,omitempty"`
+	SequenceNum *float64 `json:"sequenceNum,omitempty"`
+	MediaType   string   `json:"mediaType"`
+	CoverURL    string   `json:"coverUrl"`
+	Duration    float64  `json:"duration"`
+	Progress    float64  `json:"progress"`
+	IsFinished  bool     `json:"isFinished"`
 }
 
 // PodcastEpisode contains episode metadata and user-specific listening progress returned by Audiobookshelf.
 type PodcastEpisode struct {
-	ID          string  `json:"id"`
-	Title       string  `json:"title"`
-	Season      string  `json:"season,omitempty"`
-	Episode     string  `json:"episode,omitempty"`
-	PublishedAt string  `json:"publishedAt,omitempty"`
-	Duration    float64 `json:"duration"`
-	Progress    float64 `json:"progress"`
-	IsFinished  bool    `json:"isFinished"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Season      string   `json:"season,omitempty"`
+	Episode     string   `json:"episode,omitempty"`
+	EpisodeNum  *float64 `json:"episodeNum,omitempty"`
+	PublishedAt string   `json:"publishedAt,omitempty"`
+	Duration    float64  `json:"duration"`
+	Progress    float64  `json:"progress"`
+	IsFinished  bool     `json:"isFinished"`
 }
 
 // InProgressItem represents an audiobook or podcast episode currently in progress for the authenticated user.
 type InProgressItem struct {
-	ID           string  `json:"id"`
-	Title        string  `json:"title"`
-	Author       string  `json:"author,omitempty"`
-	Narrator     string  `json:"narrator,omitempty"`
-	MediaType    string  `json:"mediaType"`
-	CoverURL     string  `json:"coverUrl"`
-	EpisodeID    string  `json:"episodeId,omitempty"`
-	EpisodeTitle string  `json:"episodeTitle,omitempty"`
-	Duration     float64 `json:"duration"`
-	Progress     float64 `json:"progress"`
-	CurrentTime  float64 `json:"currentTime"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Author       string   `json:"author,omitempty"`
+	Narrator     string   `json:"narrator,omitempty"`
+	Series       string   `json:"series,omitempty"`
+	SeriesID     string   `json:"seriesId,omitempty"`
+	Sequence     string   `json:"sequence,omitempty"`
+	SequenceNum  *float64 `json:"sequenceNum,omitempty"`
+	Season       string   `json:"season,omitempty"`
+	Episode      string   `json:"episode,omitempty"`
+	EpisodeNum   *float64 `json:"episodeNum,omitempty"`
+	MediaType    string   `json:"mediaType"`
+	CoverURL     string   `json:"coverUrl"`
+	EpisodeID    string   `json:"episodeId,omitempty"`
+	EpisodeTitle string   `json:"episodeTitle,omitempty"`
+	Duration     float64  `json:"duration"`
+	Progress     float64  `json:"progress"`
+	CurrentTime  float64  `json:"currentTime"`
 }
 
 // ChapterItem represents a single chapter or track within an audiobook.
@@ -338,9 +352,17 @@ type itemsInProgressResponse struct {
 	LibraryItems []rawInProgressLibraryItem `json:"libraryItems"`
 }
 
+type rawSeriesEntry struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Sequence string `json:"sequence"`
+}
+
 type rawInProgressEpisode struct {
 	ID        string  `json:"id"`
 	Title     string  `json:"title"`
+	Season    string  `json:"season"`
+	Episode   string  `json:"episode"`
 	Duration  float64 `json:"duration"`
 	AudioFile struct {
 		Duration float64 `json:"duration"`
@@ -353,10 +375,13 @@ type rawInProgressLibraryItem struct {
 	MediaType     string                `json:"mediaType"`
 	Media         struct {
 		Metadata struct {
-			Title        string `json:"title"`
-			AuthorName   string `json:"authorName"`
-			Author       string `json:"author"`
-			NarratorName string `json:"narratorName"`
+			Title          string           `json:"title"`
+			AuthorName     string           `json:"authorName"`
+			Author         string           `json:"author"`
+			NarratorName   string           `json:"narratorName"`
+			SeriesName     string           `json:"seriesName"`
+			SeriesSequence string           `json:"seriesSequence"`
+			Series         []rawSeriesEntry `json:"series"`
 		} `json:"metadata"`
 		Duration float64 `json:"duration"`
 	} `json:"media"`
@@ -412,9 +437,13 @@ type rawLibraryItemResult struct {
 	ID    string `json:"id"`
 	Media struct {
 		Metadata struct {
-			Title        string `json:"title"`
-			AuthorName   string `json:"authorName"`
-			NarratorName string `json:"narratorName"`
+			Title          string           `json:"title"`
+			AuthorName     string           `json:"authorName"`
+			Author         string           `json:"author"`
+			NarratorName   string           `json:"narratorName"`
+			SeriesName     string           `json:"seriesName"`
+			SeriesSequence string           `json:"seriesSequence"`
+			Series         []rawSeriesEntry `json:"series"`
 		} `json:"metadata"`
 		Duration float64 `json:"duration"`
 	} `json:"media"`
@@ -546,7 +575,8 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 			return nil, fetchErr
 		}
 
-		for _, it := range rawItems {
+		for i := range rawItems {
+			it := &rawItems[i]
 			progress := 0.0
 			isFinished := false
 			if prog, ok := byItem[it.ID]; ok {
@@ -558,20 +588,31 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 			} else if it.UserMediaProgress != nil {
 				progress = it.UserMediaProgress.CurrentTime
 			}
+			author := it.Media.Metadata.AuthorName
+			if author == "" {
+				author = it.Media.Metadata.Author
+			}
+			series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
+			seqNum := parseSequenceNumber(seq)
 			items = append(items, MediaItem{
-				ID:         it.ID,
-				Title:      it.Media.Metadata.Title,
-				Author:     it.Media.Metadata.AuthorName,
-				Narrator:   it.Media.Metadata.NarratorName,
-				MediaType:  lib.MediaType,
-				Duration:   it.Media.Duration,
-				Progress:   progress,
-				CoverURL:   "/api/proxy/covers/" + it.ID,
-				IsFinished: isFinished,
+				ID:          it.ID,
+				Title:       it.Media.Metadata.Title,
+				Author:      author,
+				Narrator:    it.Media.Metadata.NarratorName,
+				Series:      series,
+				SeriesID:    seriesID,
+				Sequence:    seq,
+				SequenceNum: seqNum,
+				MediaType:   lib.MediaType,
+				Duration:    it.Media.Duration,
+				Progress:    progress,
+				CoverURL:    "/api/proxy/covers/" + it.ID,
+				IsFinished:  isFinished,
 			})
 		}
 	}
 
+	sortMediaItems(items)
 	return items, nil
 }
 
@@ -663,6 +704,7 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 			Title:       ep.Title,
 			Season:      ep.Season,
 			Episode:     ep.Episode,
+			EpisodeNum:  parseSequenceNumber(ep.Episode),
 			PublishedAt: publishedAtStr,
 			Duration:    duration,
 			Progress:    progress,
@@ -670,6 +712,7 @@ func (c *Client) GetPodcastEpisodes(ctx context.Context, podcastID string) ([]Po
 		})
 	}
 
+	sortPodcastEpisodes(episodes)
 	return episodes, nil
 }
 
@@ -804,14 +847,21 @@ func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[str
 		author = it.Media.Metadata.Author
 	}
 
+	series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
+	seqNum := parseSequenceNumber(seq)
+
 	item := InProgressItem{
-		ID:        it.ID,
-		Title:     it.Media.Metadata.Title,
-		Author:    author,
-		Narrator:  it.Media.Metadata.NarratorName,
-		MediaType: it.MediaType,
-		CoverURL:  "/api/proxy/covers/" + it.ID,
-		Duration:  it.Media.Duration,
+		ID:          it.ID,
+		Title:       it.Media.Metadata.Title,
+		Author:      author,
+		Narrator:    it.Media.Metadata.NarratorName,
+		Series:      series,
+		SeriesID:    seriesID,
+		Sequence:    seq,
+		SequenceNum: seqNum,
+		MediaType:   it.MediaType,
+		CoverURL:    "/api/proxy/covers/" + it.ID,
+		Duration:    it.Media.Duration,
 	}
 
 	if it.MediaType == "podcast" && it.RecentEpisode != nil {
@@ -833,6 +883,9 @@ func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[str
 func populatePodcastInProgress(item *InProgressItem, it *rawInProgressLibraryItem, byItem, byEpisode map[string]rawMediaProgressEntry) {
 	item.EpisodeID = it.RecentEpisode.ID
 	item.EpisodeTitle = it.RecentEpisode.Title
+	item.Season = it.RecentEpisode.Season
+	item.Episode = it.RecentEpisode.Episode
+	item.EpisodeNum = parseSequenceNumber(it.RecentEpisode.Episode)
 	epDur := it.RecentEpisode.Duration
 	if epDur <= 0 {
 		epDur = it.RecentEpisode.AudioFile.Duration
@@ -900,4 +953,141 @@ func (c *Client) GetBookChapters(ctx context.Context, bookID string) ([]ChapterI
 	}
 
 	return chapters, nil
+}
+
+func extractSeries(seriesList []rawSeriesEntry, seriesName, seriesSeq string) (series, seriesID, seq string) {
+	if len(seriesList) > 0 {
+		return seriesList[0].Name, seriesList[0].ID, seriesList[0].Sequence
+	}
+	return seriesName, "", seriesSeq
+}
+
+func parseSequenceNumber(seq string) *float64 {
+	trimmed := strings.TrimSpace(seq)
+	if trimmed == "" {
+		return nil
+	}
+	if val, err := strconv.ParseFloat(trimmed, 64); err == nil {
+		return &val
+	}
+	var b strings.Builder
+	hasDot := false
+parseLoop:
+	for _, r := range trimmed {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.' && !hasDot && b.Len() > 0:
+			hasDot = true
+			b.WriteRune(r)
+		default:
+			break parseLoop
+		}
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	if val, err := strconv.ParseFloat(b.String(), 64); err == nil {
+		return &val
+	}
+	return nil
+}
+
+func compareSequenceNums(a, b *float64) int {
+	switch {
+	case a != nil && b != nil:
+		if *a < *b {
+			return -1
+		}
+		if *a > *b {
+			return 1
+		}
+		return 0
+	case a != nil:
+		return -1
+	case b != nil:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortMediaItems(items []MediaItem) {
+	slices.SortFunc(items, func(a, b MediaItem) int {
+		if a.Series != "" && b.Series != "" {
+			if c := strings.Compare(strings.ToLower(a.Series), strings.ToLower(b.Series)); c != 0 {
+				return c
+			}
+			if c := compareSequenceNums(a.SequenceNum, b.SequenceNum); c != 0 {
+				return c
+			}
+			return strings.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+		}
+		if a.Series != "" {
+			if c := strings.Compare(strings.ToLower(a.Series), strings.ToLower(b.Author)); c != 0 {
+				return c
+			}
+			return -1
+		}
+		if b.Series != "" {
+			if c := strings.Compare(strings.ToLower(a.Author), strings.ToLower(b.Series)); c != 0 {
+				return c
+			}
+			return 1
+		}
+		if c := strings.Compare(strings.ToLower(a.Author), strings.ToLower(b.Author)); c != 0 {
+			return c
+		}
+		return strings.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+	})
+}
+
+func comparePublishedAt(a, b string) int {
+	switch {
+	case a != "" && b != "":
+		if a > b {
+			return -1
+		}
+		if a < b {
+			return 1
+		}
+		return 0
+	case a != "":
+		return -1
+	case b != "":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareEpisodeNums(a, b *float64) int {
+	switch {
+	case a != nil && b != nil:
+		if *a > *b {
+			return -1
+		}
+		if *a < *b {
+			return 1
+		}
+		return 0
+	case a != nil:
+		return -1
+	case b != nil:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortPodcastEpisodes(episodes []PodcastEpisode) {
+	slices.SortFunc(episodes, func(a, b PodcastEpisode) int {
+		if c := comparePublishedAt(a.PublishedAt, b.PublishedAt); c != 0 {
+			return c
+		}
+		if c := compareEpisodeNums(a.EpisodeNum, b.EpisodeNum); c != 0 {
+			return c
+		}
+		return strings.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+	})
 }

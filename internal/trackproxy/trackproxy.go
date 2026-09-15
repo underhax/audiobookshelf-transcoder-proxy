@@ -66,6 +66,10 @@ func New(absURL, token, version string) *Server {
 				MaxIdleConns:        20,
 				MaxIdleConnsPerHost: 10,
 				ForceAttemptHTTP2:   true,
+				HTTP2: &http.HTTP2Config{
+					SendPingTimeout: 15 * time.Second,
+					PingTimeout:     10 * time.Second,
+				},
 			},
 		},
 		retryDelays: []time.Duration{
@@ -473,7 +477,7 @@ func waitRetryDelay(ctx context.Context, delay time.Duration) bool {
 
 func (s *Server) handleRetryFailure(ctx context.Context, consecutiveFailures *int, bytesTransferred int64) bool {
 	if *consecutiveFailures >= len(s.retryDelays) {
-		slog.Warn("trackproxy: max retry attempts reached without progress", "attempts", len(s.retryDelays))
+		slog.Error("trackproxy: max retry attempts reached without progress", "attempts", len(s.retryDelays))
 		return false
 	}
 

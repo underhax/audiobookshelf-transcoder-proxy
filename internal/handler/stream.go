@@ -387,10 +387,24 @@ func (h *Handler) handleDisconnectSync(ctx context.Context, sess *session.Sessio
 		slog.Error("disconnect sync failed", "session_id", sess.ID, "error", syncErr)
 	} else {
 		sess.SetLastSyncPosition(currentPos)
+		slog.Debug("session synced",
+			"session_id", sess.ID,
+			"position", currentPos,
+			"duration", sess.Duration,
+			"time_listened", syncReq.TimeListened,
+		)
 	}
 	if !h.cfg.DevReusableToken {
 		if closeErr := h.absClient.CloseSession(disconnectCtx, sess.ID); closeErr != nil {
 			slog.Error("disconnect close failed", "session_id", sess.ID, "error", closeErr)
+		} else {
+			slog.Debug("session closed",
+				"session_id", sess.ID,
+				"final_position", currentPos,
+				"duration", sess.Duration,
+				"time_listened", syncReq.TimeListened,
+				"reason", termReason,
+			)
 		}
 	}
 }
@@ -613,6 +627,12 @@ func (h *Handler) runSyncLoop(ctx context.Context, sess *session.Session, stop <
 				slog.Error("periodic sync failed", "session_id", sess.ID, "error", err)
 			} else {
 				sess.SetLastSyncPosition(currentPos)
+				slog.Debug("session synced",
+					"session_id", sess.ID,
+					"position", currentPos,
+					"duration", sess.Duration,
+					"time_listened", syncReq.TimeListened,
+				)
 			}
 		}
 	}
@@ -684,10 +704,24 @@ func (h *Handler) handleSessionTerminate(w http.ResponseWriter, r *http.Request)
 		slog.Error("final sync error", "session_id", sess.ID, "error", syncErr)
 	} else {
 		sess.SetLastSyncPosition(currentPos)
+		slog.Debug("session synced",
+			"session_id", sess.ID,
+			"position", currentPos,
+			"duration", sess.Duration,
+			"time_listened", syncReq.TimeListened,
+		)
 	}
 
 	if closeErr := h.absClient.CloseSession(r.Context(), sess.ID); closeErr != nil {
 		slog.Error("close abs session error", "session_id", sess.ID, "error", closeErr)
+	} else {
+		slog.Debug("session closed",
+			"session_id", sess.ID,
+			"final_position", currentPos,
+			"duration", sess.Duration,
+			"time_listened", syncReq.TimeListened,
+			"reason", "terminate",
+		)
 	}
 	h.store.Delete(sess.ID)
 

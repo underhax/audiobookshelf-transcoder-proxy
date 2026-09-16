@@ -92,13 +92,82 @@ func TestParseSequenceNumber(t *testing.T) {
 	}
 }
 
+func TestParseSeriesName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+		wantSeq  string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			wantName: "",
+			wantSeq:  "",
+		},
+		{
+			name:     "whitespace only",
+			input:    "   ",
+			wantName: "",
+			wantSeq:  "",
+		},
+		{
+			name:     "name with sequence",
+			input:    "Series One #1",
+			wantName: "Series One",
+			wantSeq:  "1",
+		},
+		{
+			name:     "name with decimal sequence",
+			input:    "Decimal Series #11.2",
+			wantName: "Decimal Series",
+			wantSeq:  "11.2",
+		},
+		{
+			name:     "name without sequence",
+			input:    "Dune",
+			wantName: "Dune",
+			wantSeq:  "",
+		},
+		{
+			name:     "name with multiple hashes takes last hash",
+			input:    "Project #9 #3",
+			wantName: "Project #9",
+			wantSeq:  "3",
+		},
+		{
+			name:     "name with trailing hash space",
+			input:    "Empty Hash #",
+			wantName: "Empty Hash",
+			wantSeq:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotName, gotSeq := parseSeriesName(tt.input)
+			if gotName != tt.wantName {
+				t.Errorf("parseSeriesName(%q) gotName = %q, want %q", tt.input, gotName, tt.wantName)
+			}
+			if gotSeq != tt.wantSeq {
+				t.Errorf("parseSeriesName(%q) gotSeq = %q, want %q", tt.input, gotSeq, tt.wantSeq)
+			}
+		})
+	}
+}
+
 func TestExtractSeries(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
+		lookup       map[string]seriesLookupEntry
 		name         string
-		fallbackName string
-		fallbackSeq  string
+		itemID       string
+		seriesName   string
+		seriesSeq    string
 		wantSeries   string
 		wantSeriesID string
 		wantSeq      string
@@ -113,27 +182,111 @@ func TestExtractSeries(t *testing.T) {
 					Sequence: "3",
 				},
 			},
-			fallbackName: "Fallback Series A",
-			fallbackSeq:  "1",
+			itemID:       "b-1",
+			lookup:       nil,
+			seriesName:   "Fallback Series A",
+			seriesSeq:    "1",
 			wantSeries:   "Primary Series",
 			wantSeriesID: "ser-101",
 			wantSeq:      "3",
 		},
 		{
-			name:         "empty series list falls back to scalar fields",
-			seriesList:   nil,
-			fallbackName: "Fallback Series B",
-			fallbackSeq:  "2",
-			wantSeries:   "Fallback Series B",
-			wantSeriesID: "",
+			name: "primary series in list without sequence uses seriesSeq",
+			seriesList: []rawSeriesEntry{
+				{
+					ID:   "ser-102",
+					Name: "Primary Series 2",
+				},
+			},
+			itemID:       "b-2",
+			lookup:       nil,
+			seriesName:   "Fallback Series B #5",
+			seriesSeq:    "4",
+			wantSeries:   "Primary Series 2",
+			wantSeriesID: "ser-102",
+			wantSeq:      "4",
+		},
+		{
+			name: "primary series in list without sequence falls back to parsed seriesName",
+			seriesList: []rawSeriesEntry{
+				{
+					ID:   "ser-103",
+					Name: "Primary Series 3",
+				},
+			},
+			itemID:       "b-3",
+			lookup:       nil,
+			seriesName:   "Primary Series 3 #7",
+			seriesSeq:    "",
+			wantSeries:   "Primary Series 3",
+			wantSeriesID: "ser-103",
+			wantSeq:      "7",
+		},
+		{
+			name:       "series resolved via lookup map and seriesName sequence",
+			seriesList: nil,
+			itemID:     "b-4",
+			lookup: map[string]seriesLookupEntry{
+				"b-4": {id: "ser-lookup-1", name: "Lookup Series"},
+			},
+			seriesName:   "Lookup Series #2",
+			seriesSeq:    "",
+			wantSeries:   "Lookup Series",
+			wantSeriesID: "ser-lookup-1",
 			wantSeq:      "2",
+		},
+		{
+			name:       "series resolved via lookup map with explicit seriesSeq",
+			seriesList: nil,
+			itemID:     "b-5",
+			lookup: map[string]seriesLookupEntry{
+				"b-5": {id: "ser-lookup-2", name: "Lookup Saga"},
+			},
+			seriesName:   "Ignored Fallback",
+			seriesSeq:    "8",
+			wantSeries:   "Lookup Saga",
+			wantSeriesID: "ser-lookup-2",
+			wantSeq:      "8",
+		},
+		{
+			name:         "empty series list and missing lookup falls back to parsed seriesName with hash",
+			seriesList:   nil,
+			itemID:       "b-6",
+			lookup:       map[string]seriesLookupEntry{},
+			seriesName:   "Fallback Series C #9",
+			seriesSeq:    "",
+			wantSeries:   "Fallback Series C",
+			wantSeriesID: "",
+			wantSeq:      "9",
+		},
+		{
+			name:         "empty series list and missing lookup with raw name and no sequence",
+			seriesList:   nil,
+			itemID:       "b-7",
+			lookup:       nil,
+			seriesName:   "Standalone Series",
+			seriesSeq:    "",
+			wantSeries:   "Standalone Series",
+			wantSeriesID: "",
+			wantSeq:      "",
+		},
+		{
+			name:         "empty inputs produce empty outputs",
+			seriesList:   nil,
+			itemID:       "",
+			lookup:       nil,
+			seriesName:   "",
+			seriesSeq:    "",
+			wantSeries:   "",
+			wantSeriesID: "",
+			wantSeq:      "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			series, seriesID, seq := extractSeries(tt.seriesList, tt.fallbackName, tt.fallbackSeq)
+			series, seriesID, seq := extractSeries(tt.seriesList, tt.itemID, tt.lookup, tt.seriesName, tt.seriesSeq)
 			if series != tt.wantSeries {
 				t.Errorf("series = %q, want %q", series, tt.wantSeries)
 			}

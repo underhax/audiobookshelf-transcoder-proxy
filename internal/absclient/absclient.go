@@ -20,29 +20,34 @@ import (
 )
 
 const (
-	defaultLibrariesCacheTTL    = 5 * time.Minute
-	defaultLibraryItemsCacheTTL = 1 * time.Minute
-	defaultProgressCacheTTL     = 5 * time.Second
+	defaultLibrariesCacheTTL     = 5 * time.Minute
+	defaultLibraryItemsCacheTTL  = 1 * time.Minute
+	defaultLibrarySeriesCacheTTL = 1 * time.Minute
+	defaultProgressCacheTTL      = 5 * time.Second
+	defaultSeriesPageLimit       = 1000
 )
 
 // Client encapsulates HTTP communication and session synchronization with the upstream Audiobookshelf server.
 type Client struct {
-	progressCachedAt   time.Time
-	librariesCachedAt  time.Time
-	cachedLibraryItems map[string]cachedLibraryItemsEntry
-	cachedByItem       map[string]rawMediaProgressEntry
-	httpClient         *http.Client
-	cachedByEpisode    map[string]rawMediaProgressEntry
-	version            string
-	token              string
-	baseURL            string
-	cachedLibraries    []Library
-	librariesTTL       time.Duration
-	libraryItemsTTL    time.Duration
-	progressTTL        time.Duration
-	librariesMu        sync.Mutex
-	libraryItemsMu     sync.Mutex
-	progressMu         sync.Mutex
+	progressCachedAt    time.Time
+	librariesCachedAt   time.Time
+	cachedLibraryItems  map[string]cachedLibraryItemsEntry
+	cachedLibrarySeries map[string]cachedLibrarySeriesEntry
+	cachedByItem        map[string]rawMediaProgressEntry
+	cachedByEpisode     map[string]rawMediaProgressEntry
+	httpClient          *http.Client
+	version             string
+	token               string
+	baseURL             string
+	cachedLibraries     []Library
+	librariesTTL        time.Duration
+	libraryItemsTTL     time.Duration
+	librarySeriesTTL    time.Duration
+	progressTTL         time.Duration
+	librariesMu         sync.Mutex
+	libraryItemsMu      sync.Mutex
+	librarySeriesMu     sync.Mutex
+	progressMu          sync.Mutex
 }
 
 // New initializes an Audiobookshelf API client with credentials and HTTP transport settings.
@@ -52,14 +57,16 @@ func New(baseURL, token, version string, httpClient *http.Client) *Client {
 	}
 	cleanBase := strings.TrimRight(baseURL, "/")
 	return &Client{
-		baseURL:            cleanBase,
-		token:              token,
-		version:            version,
-		httpClient:         httpClient,
-		cachedLibraryItems: make(map[string]cachedLibraryItemsEntry),
-		librariesTTL:       defaultLibrariesCacheTTL,
-		libraryItemsTTL:    defaultLibraryItemsCacheTTL,
-		progressTTL:        defaultProgressCacheTTL,
+		baseURL:             cleanBase,
+		token:               token,
+		version:             version,
+		httpClient:          httpClient,
+		cachedLibraryItems:  make(map[string]cachedLibraryItemsEntry),
+		cachedLibrarySeries: make(map[string]cachedLibrarySeriesEntry),
+		librariesTTL:        defaultLibrariesCacheTTL,
+		libraryItemsTTL:     defaultLibraryItemsCacheTTL,
+		librarySeriesTTL:    defaultLibrarySeriesCacheTTL,
+		progressTTL:         defaultProgressCacheTTL,
 	}
 }
 
@@ -372,6 +379,7 @@ type rawInProgressEpisode struct {
 type rawInProgressLibraryItem struct {
 	RecentEpisode *rawInProgressEpisode `json:"recentEpisode"`
 	ID            string                `json:"id"`
+	LibraryID     string                `json:"libraryId"`
 	MediaType     string                `json:"mediaType"`
 	Media         struct {
 		Metadata struct {
@@ -456,6 +464,31 @@ type cachedLibraryItemsEntry struct {
 
 type libraryItemsResponse struct {
 	Results []rawLibraryItemResult `json:"results"`
+}
+
+type cachedLibrarySeriesEntry struct {
+	cachedAt time.Time
+	series   []rawLibrarySeries
+}
+
+type librarySeriesResponse struct {
+	Results []rawLibrarySeries `json:"results"`
+	Total   int                `json:"total"`
+	Limit   int                `json:"limit"`
+	Page    int                `json:"page"`
+}
+
+type rawLibrarySeries struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Books []struct {
+		ID string `json:"id"`
+	} `json:"books"`
+}
+
+type seriesLookupEntry struct {
+	id   string
+	name string
 }
 
 // GetLibraries fetches configured library collections to discover available audiobook and podcast repositories.
@@ -555,6 +588,82 @@ func (c *Client) fetchLibraryItems(ctx context.Context, libID string) ([]rawLibr
 	return items, nil
 }
 
+func (c *Client) fetchLibrarySeries(ctx context.Context, libID string) ([]rawLibrarySeries, error) {
+	c.librarySeriesMu.Lock()
+	defer c.librarySeriesMu.Unlock()
+
+	ttl := c.librarySeriesTTL
+	if ttl <= 0 {
+		ttl = defaultLibrarySeriesCacheTTL
+	}
+
+	if entry, ok := c.cachedLibrarySeries[libID]; ok && time.Since(entry.cachedAt) < ttl {
+		series := make([]rawLibrarySeries, len(entry.series))
+		copy(series, entry.series)
+		return series, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("context canceled: %w", err)
+	}
+
+	var allSeries []rawLibrarySeries
+	page := 0
+	for {
+		endpoint := fmt.Sprintf("/api/libraries/%s/series?limit=%d&page=%d", libID, defaultSeriesPageLimit, page)
+		req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		status, body, err := c.sendAndReadBody(req)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("get library series for %s failed with status %d: %s", libID, status, string(body))
+		}
+
+		var resp librarySeriesResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("unmarshal library series response: %w", err)
+		}
+
+		allSeries = append(allSeries, resp.Results...)
+		if len(resp.Results) == 0 || (resp.Total > 0 && len(allSeries) >= resp.Total) {
+			break
+		}
+		page++
+	}
+
+	if c.cachedLibrarySeries == nil {
+		c.cachedLibrarySeries = make(map[string]cachedLibrarySeriesEntry)
+	}
+	c.cachedLibrarySeries[libID] = cachedLibrarySeriesEntry{
+		cachedAt: time.Now(),
+		series:   allSeries,
+	}
+
+	series := make([]rawLibrarySeries, len(allSeries))
+	copy(series, allSeries)
+	return series, nil
+}
+
+func buildBookSeriesLookup(seriesList []rawLibrarySeries) map[string]seriesLookupEntry {
+	lookup := make(map[string]seriesLookupEntry)
+	for _, s := range seriesList {
+		for _, b := range s.Books {
+			if b.ID != "" {
+				lookup[b.ID] = seriesLookupEntry{
+					id:   s.ID,
+					name: s.Name,
+				}
+			}
+		}
+	}
+	return lookup
+}
+
 // GetMediaItems retrieves audiobooks or podcasts from all accessible libraries to build client catalog feeds.
 func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaItem, error) {
 	libs, err := c.GetLibraries(ctx)
@@ -575,6 +684,15 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 			return nil, fetchErr
 		}
 
+		var seriesLookup map[string]seriesLookupEntry
+		if lib.MediaType == "book" {
+			if rawSeries, sErr := c.fetchLibrarySeries(ctx, lib.ID); sErr == nil {
+				seriesLookup = buildBookSeriesLookup(rawSeries)
+			} else {
+				slog.Warn("fetch library series failed", "library_id", lib.ID, "error", sErr)
+			}
+		}
+
 		for i := range rawItems {
 			it := &rawItems[i]
 			progress := 0.0
@@ -592,7 +710,7 @@ func (c *Client) GetMediaItems(ctx context.Context, mediaType string) ([]MediaIt
 			if author == "" {
 				author = it.Media.Metadata.Author
 			}
-			series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
+			series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.ID, seriesLookup, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
 			seqNum := parseSequenceNumber(seq)
 			items = append(items, MediaItem{
 				ID:          it.ID,
@@ -770,10 +888,21 @@ func (c *Client) GetInProgressItems(ctx context.Context) ([]InProgressItem, erro
 	}
 
 	byItem, byEpisode := c.fetchProgressLookups(ctx)
+	libSeriesLookups := make(map[string]map[string]seriesLookupEntry)
 
 	items := make([]InProgressItem, len(inProgResp.LibraryItems))
 	for i := range inProgResp.LibraryItems {
-		items[i] = buildInProgressItem(&inProgResp.LibraryItems[i], byItem, byEpisode)
+		it := &inProgResp.LibraryItems[i]
+		var seriesLookup map[string]seriesLookupEntry
+		if it.LibraryID != "" && it.MediaType == "book" {
+			if lookup, ok := libSeriesLookups[it.LibraryID]; ok {
+				seriesLookup = lookup
+			} else if rawSeries, sErr := c.fetchLibrarySeries(ctx, it.LibraryID); sErr == nil {
+				seriesLookup = buildBookSeriesLookup(rawSeries)
+				libSeriesLookups[it.LibraryID] = seriesLookup
+			}
+		}
+		items[i] = buildInProgressItem(it, byItem, byEpisode, seriesLookup)
 	}
 
 	return items, nil
@@ -841,13 +970,13 @@ func copyProgressLookups(srcItem, srcEpisode map[string]rawMediaProgressEntry) (
 	return byItem, byEpisode
 }
 
-func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[string]rawMediaProgressEntry) InProgressItem {
+func buildInProgressItem(it *rawInProgressLibraryItem, byItem, byEpisode map[string]rawMediaProgressEntry, seriesLookup map[string]seriesLookupEntry) InProgressItem {
 	author := it.Media.Metadata.AuthorName
 	if author == "" {
 		author = it.Media.Metadata.Author
 	}
 
-	series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
+	series, seriesID, seq := extractSeries(it.Media.Metadata.Series, it.ID, seriesLookup, it.Media.Metadata.SeriesName, it.Media.Metadata.SeriesSequence)
 	seqNum := parseSequenceNumber(seq)
 
 	item := InProgressItem{
@@ -955,11 +1084,52 @@ func (c *Client) GetBookChapters(ctx context.Context, bookID string) ([]ChapterI
 	return chapters, nil
 }
 
-func extractSeries(seriesList []rawSeriesEntry, seriesName, seriesSeq string) (series, seriesID, seq string) {
-	if len(seriesList) > 0 {
-		return seriesList[0].Name, seriesList[0].ID, seriesList[0].Sequence
+func parseSeriesName(raw string) (name, seq string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ""
 	}
-	return seriesName, "", seriesSeq
+	if idx := strings.LastIndex(trimmed, " #"); idx != -1 {
+		return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(trimmed[idx+2:])
+	}
+	return trimmed, ""
+}
+
+func extractSeries(seriesList []rawSeriesEntry, itemID string, lookup map[string]seriesLookupEntry, seriesName, seriesSeq string) (series, seriesID, seq string) {
+	if len(seriesList) > 0 {
+		s := seriesList[0]
+		seqVal := s.Sequence
+		if seqVal == "" {
+			seqVal = seriesSeq
+		}
+		if seqVal == "" {
+			_, seqVal = parseSeriesName(seriesName)
+		}
+		return s.Name, s.ID, seqVal
+	}
+
+	var seriesTitle string
+	if lookup != nil {
+		if entry, ok := lookup[itemID]; ok {
+			seriesID = entry.id
+			seriesTitle = entry.name
+		}
+	}
+
+	nameFromMeta, seqFromMeta := parseSeriesName(seriesName)
+	if seriesTitle != "" {
+		series = seriesTitle
+	} else {
+		series = nameFromMeta
+	}
+
+	if seriesSeq != "" {
+		seq = seriesSeq
+	} else {
+		seq = seqFromMeta
+	}
+
+	return series, seriesID, seq
 }
 
 func parseSequenceNumber(seq string) *float64 {

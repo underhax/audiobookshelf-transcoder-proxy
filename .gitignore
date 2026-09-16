@@ -16,3 +16,4 @@ go.work.sum
 /abstp
 
 *.log
+*.json

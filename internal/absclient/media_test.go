@@ -305,9 +305,16 @@ func TestGetMediaItems(t *testing.T) {
 		librariesResp string
 		itemsResp     string
 		progressResp  string
+		seriesResp    string
+		wantFirstID   string
+		wantSecondID  string
+		wantSeries    string
+		wantSeriesID  string
+		wantSeq       string
 		wantItems     int
 		librariesCode int
 		itemsCode     int
+		seriesCode    int
 		wantProgress  float64
 		wantErr       bool
 		wantFinished  bool
@@ -327,6 +334,32 @@ func TestGetMediaItems(t *testing.T) {
 			itemsCode:     http.StatusOK,
 			itemsResp:     `{"results":[{"id":"b-series","media":{"metadata":{"title":"Series Book","author":"Fallback Author","series":[{"id":"ser-1","name":"Main Series","sequence":"2"}]},"duration":1200}}]}`,
 			wantItems:     1,
+		},
+		{
+			name:          "series resolved from library series and sorted numerically",
+			librariesCode: http.StatusOK,
+			librariesResp: `{"libraries":[{"id":"lib-sorted","name":"Books","mediaType":"book"}]}`,
+			itemsCode:     http.StatusOK,
+			itemsResp:     `{"results":[{"id":"b-10","media":{"metadata":{"title":"Book Ten","authorName":"Author S","seriesName":"Saga #10"},"duration":1000}},{"id":"b-2","media":{"metadata":{"title":"Book Two","authorName":"Author S","seriesName":"Saga #2"},"duration":2000}}]}`,
+			seriesResp:    `{"results":[{"id":"ser-saga-1","name":"Saga","books":[{"id":"b-10"},{"id":"b-2"}]}],"total":1,"limit":1000,"page":0}`,
+			wantItems:     2,
+			wantFirstID:   "b-2",
+			wantSecondID:  "b-10",
+			wantSeries:    "Saga",
+			wantSeriesID:  "ser-saga-1",
+			wantSeq:       "2",
+		},
+		{
+			name:          "fetch series fails gracefully and continues",
+			librariesCode: http.StatusOK,
+			librariesResp: `{"libraries":[{"id":"lib-series-err","name":"Books","mediaType":"book"}]}`,
+			itemsCode:     http.StatusOK,
+			itemsResp:     `{"results":[{"id":"b-err-ser","media":{"metadata":{"title":"Solo Series Err","authorName":"Author Err","seriesName":"Fallback #1"},"duration":1000}}]}`,
+			seriesCode:    http.StatusInternalServerError,
+			seriesResp:    "series failure",
+			wantItems:     1,
+			wantSeries:    "Fallback",
+			wantSeq:       "1",
 		},
 		{
 			name:          "success with progress lookups and finished status",
@@ -389,28 +422,60 @@ func TestGetMediaItems(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			mockFn := createMediaItemsMock(tt.librariesCode, tt.librariesResp, tt.progressResp, tt.itemsResp, tt.itemsCode, tt.transportErr)
+			mockFn := createMediaItemsMock(tt.librariesCode, tt.librariesResp, tt.progressResp, tt.itemsResp, tt.itemsCode, tt.seriesResp, tt.seriesCode, tt.transportErr)
 			c := New("http://abs.example.org", "tok", "1.0.0", newMockHTTPClient(mockFn))
 			items, err := c.GetMediaItems(context.Background(), "book")
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("GetMediaItems() error = %v, wantErr = %v", err, tt.wantErr)
 			}
-			if !tt.wantErr && len(items) != tt.wantItems {
+			if tt.wantErr {
+				return
+			}
+			if len(items) != tt.wantItems {
 				t.Errorf("got %d items, want %d", len(items), tt.wantItems)
 			}
-			if !tt.wantErr && tt.wantProgress > 0 && len(items) > 0 {
-				if items[0].Progress != tt.wantProgress {
-					t.Errorf("got progress %v, want %v", items[0].Progress, tt.wantProgress)
-				}
-				if items[0].IsFinished != tt.wantFinished {
-					t.Errorf("got isFinished %v, want %v", items[0].IsFinished, tt.wantFinished)
-				}
+			if tt.wantProgress > 0 && len(items) > 0 {
+				assertMediaItemProgress(t, &items[0], tt.wantProgress, tt.wantFinished)
 			}
+			assertMediaItemMatches(t, items, tt.wantFirstID, tt.wantSecondID, tt.wantSeries, tt.wantSeriesID, tt.wantSeq)
 		})
 	}
 }
 
-func createMediaItemsMock(librariesCode int, librariesResp, progressResp, itemsResp string, itemsCode int, transportErr error) roundTripFunc {
+func assertMediaItemMatches(t *testing.T, items []MediaItem, wantFirstID, wantSecondID, wantSeries, wantSeriesID, wantSeq string) {
+	t.Helper()
+	if wantFirstID != "" && len(items) >= 2 {
+		if items[0].ID != wantFirstID {
+			t.Errorf("items[0].ID = %q, want %q", items[0].ID, wantFirstID)
+		}
+		if items[1].ID != wantSecondID {
+			t.Errorf("items[1].ID = %q, want %q", items[1].ID, wantSecondID)
+		}
+	}
+	if wantSeries != "" && len(items) > 0 {
+		if items[0].Series != wantSeries {
+			t.Errorf("items[0].Series = %q, want %q", items[0].Series, wantSeries)
+		}
+		if items[0].SeriesID != wantSeriesID {
+			t.Errorf("items[0].SeriesID = %q, want %q", items[0].SeriesID, wantSeriesID)
+		}
+		if items[0].Sequence != wantSeq {
+			t.Errorf("items[0].Sequence = %q, want %q", items[0].Sequence, wantSeq)
+		}
+	}
+}
+
+func assertMediaItemProgress(t *testing.T, item *MediaItem, wantProgress float64, wantFinished bool) {
+	t.Helper()
+	if item.Progress != wantProgress {
+		t.Errorf("got progress %v, want %v", item.Progress, wantProgress)
+	}
+	if item.IsFinished != wantFinished {
+		t.Errorf("got isFinished %v, want %v", item.IsFinished, wantFinished)
+	}
+}
+
+func createMediaItemsMock(librariesCode int, librariesResp, progressResp, itemsResp string, itemsCode int, seriesResp string, seriesCode int, transportErr error) roundTripFunc {
 	return func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/api/libraries" {
 			if librariesCode != http.StatusOK {
@@ -423,6 +488,17 @@ func createMediaItemsMock(librariesCode int, librariesResp, progressResp, itemsR
 		}
 		if transportErr != nil {
 			return nil, transportErr
+		}
+		if strings.HasSuffix(r.URL.Path, "/series") {
+			sCode := seriesCode
+			if sCode == 0 {
+				sCode = http.StatusOK
+			}
+			sBody := seriesResp
+			if sBody == "" {
+				sBody = `{"results":[],"total":0,"limit":1000,"page":0}`
+			}
+			return &http.Response{StatusCode: sCode, Body: io.NopCloser(strings.NewReader(sBody))}, nil
 		}
 		code := itemsCode
 		if code == 0 {
@@ -519,6 +595,9 @@ func TestGetInProgressItems(t *testing.T) {
 		name         string
 		itemsResp    string
 		progressResp string
+		wantSeries   string
+		wantSeriesID string
+		wantSeq      string
 		itemsCode    int
 		progressCode int
 		wantItems    int
@@ -533,6 +612,28 @@ func TestGetInProgressItems(t *testing.T) {
 			wantItems:    2,
 			wantDuration: 1000.0,
 			wantProgress: 250.0,
+		},
+		{
+			name:         "book with series lookup resolved",
+			itemsResp:    `{"libraryItems":[{"id":"bk-prog-ser","libraryId":"lib-book-1","mediaType":"book","media":{"duration":1500.0,"metadata":{"title":"Book with Series","authorName":"Series Author","seriesName":"Galaxy #5"}}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"bk-prog-ser","currentTime":300.0,"duration":1500.0}]}`,
+			wantItems:    1,
+			wantDuration: 1500.0,
+			wantProgress: 300.0,
+			wantSeries:   "Galaxy",
+			wantSeriesID: "ser-prog-uuid",
+			wantSeq:      "5",
+		},
+		{
+			name:         "multiple books in same library reuse cached series lookup",
+			itemsResp:    `{"libraryItems":[{"id":"bk-multi-1","libraryId":"lib-shared","mediaType":"book","media":{"duration":1200.0,"metadata":{"title":"Book Shared 1","authorName":"Shared Author","seriesName":"Shared Saga #1"}}},{"id":"bk-multi-2","libraryId":"lib-shared","mediaType":"book","media":{"duration":1200.0,"metadata":{"title":"Book Shared 2","authorName":"Shared Author","seriesName":"Shared Saga #2"}}}]}`,
+			progressResp: `{"mediaProgress":[{"libraryItemId":"bk-multi-1","currentTime":100.0,"duration":1200.0},{"libraryItemId":"bk-multi-2","currentTime":200.0,"duration":1200.0}]}`,
+			wantItems:    2,
+			wantDuration: 1200.0,
+			wantProgress: 100.0,
+			wantSeries:   "Shared Saga",
+			wantSeriesID: "ser-shared-uuid",
+			wantSeq:      "1",
 		},
 		{
 			name:      "error from items-in-progress endpoint",
@@ -643,6 +744,7 @@ func TestGetInProgressItems(t *testing.T) {
 			if items[0].CurrentTime != tt.wantProgress {
 				t.Errorf("items[0].CurrentTime = %v, want %v", items[0].CurrentTime, tt.wantProgress)
 			}
+			assertInProgressItemDetails(t, &items[0], tt.wantSeries, tt.wantSeriesID, tt.wantSeq)
 		})
 	}
 
@@ -657,6 +759,19 @@ func TestGetInProgressItems(t *testing.T) {
 	}
 }
 
+func assertInProgressItemDetails(t *testing.T, item *InProgressItem, wantSeries, wantSeriesID, wantSeq string) {
+	t.Helper()
+	if wantSeries != "" && item.Series != wantSeries {
+		t.Errorf("items[0].Series = %q, want %q", item.Series, wantSeries)
+	}
+	if wantSeriesID != "" && item.SeriesID != wantSeriesID {
+		t.Errorf("items[0].SeriesID = %q, want %q", item.SeriesID, wantSeriesID)
+	}
+	if wantSeq != "" && item.Sequence != wantSeq {
+		t.Errorf("items[0].Sequence = %q, want %q", item.Sequence, wantSeq)
+	}
+}
+
 func inProgressMockTransport(itemsCode int, itemsResp string, progressCode int, progressResp string) roundTripFunc {
 	return func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
@@ -665,6 +780,10 @@ func inProgressMockTransport(itemsCode int, itemsResp string, progressCode int, 
 		case "/api/me/progress":
 			return &http.Response{StatusCode: progressCode, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(progressResp))}, nil
 		default:
+			if strings.HasSuffix(req.URL.Path, "/series") {
+				seriesJSON := `{"results":[{"id":"ser-prog-uuid","name":"Galaxy","books":[{"id":"bk-prog-ser"}]},{"id":"ser-shared-uuid","name":"Shared Saga","books":[{"id":"bk-multi-1"},{"id":"bk-multi-2"}]}],"total":2,"limit":1000,"page":0}`
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(seriesJSON))}, nil
+			}
 			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 		}
 	}
@@ -766,5 +885,220 @@ func TestGetBookChapters(t *testing.T) {
 	cBad := New("http://[::1]:namedport", "tok", "1.0.0", nil)
 	if _, err := cBad.GetBookChapters(context.Background(), "book-1"); err == nil {
 		t.Error("expected error on invalid URL")
+	}
+}
+
+func TestFetchLibrarySeries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mockFn      roundTripFunc
+		name        string
+		libID       string
+		wantSeries  int
+		wantErr     bool
+		checkCached bool
+		checkCancel bool
+	}{
+		{
+			name:  "single page success",
+			libID: "lib-s1",
+			mockFn: func(r *http.Request) (*http.Response, error) {
+				if !strings.Contains(r.URL.Path, "/api/libraries/lib-s1/series") {
+					t.Errorf("unexpected path: %s", r.URL.Path)
+				}
+				respJSON := `{"results":[{"id":"ser-1","name":"Series A","books":[{"id":"bk-1"}]}],"total":1,"limit":1000,"page":0}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(respJSON)),
+				}, nil
+			},
+			wantSeries: 1,
+		},
+		{
+			name:  "multi-page pagination success",
+			libID: "lib-s2",
+			mockFn: func(r *http.Request) (*http.Response, error) {
+				page := r.URL.Query().Get("page")
+				if page == "0" {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"results":[{"id":"s-p0","name":"Page Zero"}],"total":2,"limit":1,"page":0}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"results":[{"id":"s-p1","name":"Page One"}],"total":2,"limit":1,"page":1}`)),
+				}, nil
+			},
+			wantSeries: 2,
+		},
+		{
+			name:  "cache hit on second call",
+			libID: "lib-s3",
+			mockFn: func() roundTripFunc {
+				calls := 0
+				return func(_ *http.Request) (*http.Response, error) {
+					calls++
+					if calls > 1 {
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Body:       io.NopCloser(strings.NewReader("err")),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"results":[{"id":"s-cached","name":"Cached Series"}],"total":1}`)),
+					}, nil
+				}
+			}(),
+			wantSeries:  1,
+			checkCached: true,
+		},
+		{
+			name:  "http status 500 error",
+			libID: "lib-s4",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Body:       io.NopCloser(strings.NewReader("internal server error")),
+				}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name:        "context canceled error",
+			libID:       "lib-s5",
+			checkCancel: true,
+			wantErr:     true,
+		},
+		{
+			name:  "invalid json response",
+			libID: "lib-s6",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{not-valid-json")),
+				}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name:  "network transport error",
+			libID: "lib-s7",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				return nil, errors.New("network failed")
+			},
+			wantErr: true,
+		},
+		{
+			name:  "empty results returns empty slice",
+			libID: "lib-s8",
+			mockFn: func(_ *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"results":[],"total":0}`)),
+				}, nil
+			},
+			wantSeries: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := New("http://abs.example.org", "test-token", "1.0.0", newMockHTTPClient(tt.mockFn))
+			ctx := context.Background()
+			if tt.checkCancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			series, err := c.fetchLibrarySeries(ctx, tt.libID)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("fetchLibrarySeries() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if len(series) != tt.wantSeries {
+				t.Errorf("got %d series, want %d", len(series), tt.wantSeries)
+			}
+			if tt.checkCached {
+				cachedSeries, cErr := c.fetchLibrarySeries(context.Background(), tt.libID)
+				if cErr != nil {
+					t.Fatalf("second call failed: %v", cErr)
+				}
+				if len(cachedSeries) != tt.wantSeries {
+					t.Errorf("got %d cached series, want %d", len(cachedSeries), tt.wantSeries)
+				}
+			}
+		})
+	}
+
+	cBad := New("http://[::1]:namedport", "tok", "1.0.0", nil)
+	if _, err := cBad.fetchLibrarySeries(context.Background(), "lib-1"); err == nil {
+		t.Error("expected error on invalid URL")
+	}
+}
+
+func TestBuildBookSeriesLookup(t *testing.T) {
+	t.Parallel()
+
+	seriesList := []rawLibrarySeries{
+		{
+			ID:   "ser-1",
+			Name: "Alpha Chronicle",
+			Books: []struct {
+				ID string `json:"id"`
+			}{
+				{ID: "bk-1"},
+				{ID: "bk-2"},
+				{ID: ""},
+			},
+		},
+		{
+			ID:   "ser-2",
+			Name: "Beta Chronicle",
+			Books: []struct {
+				ID string `json:"id"`
+			}{
+				{ID: "bk-3"},
+			},
+		},
+	}
+
+	lookup := buildBookSeriesLookup(seriesList)
+	if len(lookup) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(lookup))
+	}
+	if entry, ok := lookup["bk-1"]; !ok || entry.id != "ser-1" || entry.name != "Alpha Chronicle" {
+		t.Errorf("unexpected lookup for bk-1: %+v", entry)
+	}
+	if entry, ok := lookup["bk-3"]; !ok || entry.id != "ser-2" || entry.name != "Beta Chronicle" {
+		t.Errorf("unexpected lookup for bk-3: %+v", entry)
+	}
+}
+
+func TestFetchLibrarySeries_CacheFallbackAndNilMap(t *testing.T) {
+	t.Parallel()
+
+	client := New("http://series-cache.abs.example.org", "tok", "1.0.0", newMockHTTPClient(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"results":[{"id":"ser-c1","name":"Cache Fallback"}],"total":1,"limit":1000,"page":0}`)),
+		}, nil
+	}))
+
+	client.librarySeriesTTL = 0
+	series, err := client.fetchLibrarySeries(context.Background(), "lib-c1")
+	if err != nil || len(series) != 1 {
+		t.Fatalf("unexpected result with zero TTL: %v, %v", series, err)
+	}
+
+	client.cachedLibrarySeries = nil
+	series2, err2 := client.fetchLibrarySeries(context.Background(), "lib-c2")
+	if err2 != nil || len(series2) != 1 {
+		t.Fatalf("unexpected result with nil cache map: %v, %v", series2, err2)
 	}
 }

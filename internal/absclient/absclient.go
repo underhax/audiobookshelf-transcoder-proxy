@@ -1089,8 +1089,8 @@ func parseSeriesName(raw string) (name, seq string) {
 	if trimmed == "" {
 		return "", ""
 	}
-	if idx := strings.LastIndex(trimmed, " #"); idx != -1 {
-		return strings.TrimSpace(trimmed[:idx]), strings.TrimSpace(trimmed[idx+2:])
+	if before, after, ok := strings.CutLast(trimmed, " #"); ok {
+		return strings.TrimSpace(before), strings.TrimSpace(after)
 	}
 	return trimmed, ""
 }

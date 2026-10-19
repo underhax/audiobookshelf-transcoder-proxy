@@ -202,7 +202,9 @@ func TestDefaultShutdown(t *testing.T) {
 		t.Error("expected error when listener close fails")
 	}
 
-	<-serverErrChan
+	if srvErr := <-serverErrChan; !errors.Is(srvErr, http.ErrServerClosed) {
+		t.Errorf("unexpected server error: %v", srvErr)
+	}
 }
 
 type errListener struct {

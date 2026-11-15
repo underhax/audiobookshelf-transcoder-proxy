@@ -1,3 +1,3 @@
 module github.com/underhax/audiobookshelf-transcoder-proxy
 
-go 1.27.3
+go 1.27.4

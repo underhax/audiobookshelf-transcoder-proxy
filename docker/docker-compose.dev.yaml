@@ -1,6 +1,6 @@
 services:
   abstp:
-    image: ghcr.io/underhax/audiobookshelf-transcoder-proxy:dev
+    image: abstp:dev
     build:
       context: ..
       dockerfile: docker/Dockerfile

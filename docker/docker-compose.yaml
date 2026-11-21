@@ -1,6 +1,6 @@
 services:
   abstp:
-    image: ghcr.io/underhax/audiobookshelf-transcoder-proxy:latest
+    image: ghcr.io/underhax/abstp:latest
     container_name: abstp
     hostname: abstp
     restart: always

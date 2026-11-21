@@ -114,7 +114,7 @@ docker run -d \
   -v "${BASE_DIR}/secrets/abstp_abs_api_key.txt:/run/secrets/abstp_abs_api_key:ro" \
   -v "${BASE_DIR}/secrets/abstp_api_key.txt:/run/secrets/abstp_api_key:ro" \
   -e ABSTP_ABS_URL="https://abs.example.org" \
-  ghcr.io/underhax/audiobookshelf-transcoder-proxy:latest
+  ghcr.io/underhax/abstp:latest
 ```
 
 </details>
